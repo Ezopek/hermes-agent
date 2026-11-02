@@ -136,7 +136,13 @@ def _resolve_budget_fallback(
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-        if _pending_verification_response:
+        from agent.turn_stop_gates import pre_stop_unresolved_notice
+        _rejected_notice = pre_stop_unresolved_notice(agent)
+        if _rejected_notice:
+            # ``pre_stop`` rejected the withheld candidate and the budget ran out before it passed:
+            # publish the unresolved state, never the rejected candidate as if it were accepted.
+            final_response = _rejected_notice
+        elif _pending_verification_response:
             # A verification gate withheld a composed answer, then the budget ran out:
             # preserve it rather than make another fallible call. The explicit pending
             # value is the provenance guard; unrelated error exits never enter here.
@@ -528,6 +534,13 @@ def apply_llm_output_transform(
         return final_response, transformed, pre_transform
     if not final_response:
         return final_response, False, None
+    # The stop gate's own ``Unresolved`` notice is protected provenance for this turn only (it is tied to the turn id
+    # of the stop verdict): no transform may substitute the rejected draft for it, whichever seam asks first.
+    from agent.turn_stop_gates import pre_stop_unresolved_notice
+    notice = pre_stop_unresolved_notice(agent)
+    if notice and isinstance(final_response, str) and final_response.startswith(notice):
+        agent._llm_output_transform = (turn_id, False, None)
+        return final_response, False, None
     if platform is None:
         platform = getattr(agent, "platform", None) or ""
     transformed, pre_transform = False, None
@@ -650,10 +663,12 @@ def finalize_turn(
 
     # Sibling producers (``turn_recovery``, ``codex_runtime``) return ``completed=False`` for an
     # interrupted turn; the gateway stream gate and the API run status rely on that contract.
+    from agent.turn_stop_gates import pre_stop_unresolved_notice
     completed = (
         final_response is not None
         and not failed
         and not interrupted
+        and pre_stop_unresolved_notice(agent) is None
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 

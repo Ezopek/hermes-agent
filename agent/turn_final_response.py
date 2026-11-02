@@ -348,6 +348,8 @@ def finish_text_response(
     if _sg.continue_turn:
         final_response = None
         return _verdict("continue")
+    # A gate may end the turn with its own text instead of the candidate (``pre_stop`` unresolved notice).
+    _gate_replaced, final_response = _sg.final_response is not final_response, _sg.final_response
 
     # Plugins rewrite the reply BEFORE it is appended and flushed: SQLite treats a non-blank
     # assistant row as settled, so a transform after this write would reach the user but never
@@ -359,11 +361,8 @@ def finish_text_response(
         final_response, _transformed, _ = apply_llm_output_transform(
             agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger,
         )
-    if _transformed:
-        if _promoted:
-            final_msg["api_content"] = final_response
-        else:
-            final_msg["content"] = final_response
+    if _transformed or _gate_replaced:
+        final_msg["api_content" if _promoted and not _gate_replaced else "content"] = final_response
     publish_held_final_row(agent, final_msg, final_response, _joined)
 
     append_message(messages, final_msg)
