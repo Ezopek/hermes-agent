@@ -457,6 +457,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`, `side_question_token` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |
+| [`pre_stop`](#pre_stop) | Directive/control | At every text stop in any task domain (no edit needed); `unresolved` wins over the first `continue`; a callback that raised or timed out counts as `unresolved`. | `session_id`, `platform`, `model`, `turn_id`, `task_id`, `attempt`, `max_attempts`, `final_response` | Draft response. |
 | `pre_api_request` | Observer | Per provider attempt, immediately before the request; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `user_message`, `conversation_history`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `retry_count`, `request_messages`, `message_count`, `tool_count`, `approx_input_tokens`, `request_char_count`, `max_tokens`, `started_at`, `middleware_trace`, `request` | High sensitivity: legacy `user_message`, `conversation_history`, and `request_messages` are intentionally raw; prefer sanitized `request`. |
 | `post_api_request` | Observer | After normalized provider success; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `api_duration`, `started_at`, `ended_at`, `finish_reason`, `message_count`, `response_model`, `response`, `usage`, `assistant_message`, `assistant_content_chars`, `assistant_tool_call_count` | Sanitized `response` is available, but raw normalized `assistant_message` may contain model/user content; `usage` is accounting data. |
 | `api_request_error` | Observer | On each failed provider attempt; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `api_duration`, `started_at`, `ended_at`, `status_code`, `retry_count`, `max_retries`, `retryable`, `reason`, `error`, `request` | Error text may contain provider/user data; `request` is intended to be sanitized. |
@@ -885,6 +886,40 @@ def register(ctx):
 ```
 
 For standing guidance that should shape the built-in missing-evidence nudge, use `agent.verify_guidance`. For broader coding posture rules that don't need to *gate* verification, prefer `agent.coding_instructions` in `config.yaml` — it rides the coding brief and costs no extra turn.
+
+---
+
+### `pre_stop`
+
+Fires **on every text stop, in every task domain** (research, read-only analysis, ops, code), just before the agent would accept its final answer, right after `pre_verify` would have run. Unlike `pre_verify` it needs no file edits. It is a generic mechanism: Hermes ships no policy for it, and with no `pre_stop` callback registered nothing is called and no model turn is added.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, platform: str, model: str, turn_id: str, task_id: str,
+                attempt: int, max_attempts: int, final_response: str, **kwargs):
+```
+
+`attempt` counts the `continue` nudges already issued this turn, `max_attempts` is `agent.max_verify_nudges`, and `final_response` is the draft answer.
+
+**Return value:**
+
+```python
+return {"action": "continue", "message": "Record what you did with result X before finishing."}
+return {"action": "unresolved", "message": "The check cannot run: dependency Y is missing."}
+```
+
+- `continue` (or the Claude-Code Stop shape `{"decision": "block", "reason": ...}`) appends `message` as a synthetic user turn and runs the loop again, counted against `agent.max_verify_nudges`.
+- `unresolved` ends the turn at once.
+- Any other return, or `None`, lets the turn finish. A later pass in the same turn clears an earlier `continue`.
+
+**What is never published as the answer:** when the turn ends while the last `pre_stop` evaluation did not pass (the continuation cap is reached, the iteration budget runs out, or the hook returns `unresolved`), Hermes publishes `Unresolved: this turn ended without satisfying its completion check. <message>` instead of the rejected draft, stored as the ordinary content of the final row (it replaces a promoted-reasoning draft and its replay sidecar), and the turn result has `completed: False`. The rejected draft stays in the transcript as an interim row.
+
+**Unlike the other hooks it does not fail open:** a callback that raises or exceeds `plugins.hook_callback_timeout` counts as `unresolved`. The notice names the callback, never its error text. If the hook machinery itself cannot run (including the registration check), the turn is also reported unresolved. A callback that is registered while the private safe-worker policy disables plugin hooks never runs and is reported `unresolved` too (a normal safe bootstrap registers none, so it stays a no-op there). An interrupt wins: the hook is not consulted for an interrupted turn.
+
+**Kanban workers:** an `unresolved` verdict does not skip the existing terminal-tool guard. A worker without a terminal board call is still nudged (that guard's own cap applies) to hand the card off, for example by blocking it on the unresolved dependency; the turn still ends `Unresolved` and `completed: False`, never as success.
+
+**Limits:** this is a reliability gate for a cooperating plugin in the same process and profile, not a security boundary. It does not survive a process restart, and it only runs for turns that reach a text stop.
 
 ---
 

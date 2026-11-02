@@ -42,7 +42,7 @@ logger = logging.getLogger("hermes_cli.plugins")
 _HOOK_TIMEOUT_BOUNDED_HOOKS: set[str] = {
     "post_tool_call", "transform_terminal_output", "transform_tool_result", "transform_llm_output",
     "pre_llm_call", "post_llm_call", "pre_api_request", "post_api_request", "api_request_error",
-    "pre_auxiliary_call", "post_auxiliary_call", "pre_verify", "on_session_start", "on_session_end",
+    "pre_auxiliary_call", "post_auxiliary_call", "pre_verify", "pre_stop", "on_session_start", "on_session_end",
     # Fail-open consumer on every inbound gateway message: a hung plugin must not stall the profile.
     "post_gateway_admission",
     # Observer on every local session's commands, fired by the gateway (gateway/session_commands.py).
@@ -84,6 +84,54 @@ def held_stream_transforms() -> tuple[Callable, ...]:
     from hermes_cli.plugins import _delivery_manager
 
     return _delivery_manager().held_transforms()
+
+
+def pre_stop_suppressed_by_policy() -> bool:
+    """A ``pre_stop`` callback is registered while the private safe-worker policy disables plugin hooks. No callback
+    runs under that policy and nothing here toggles it; this only reports the registered-but-suppressed fault state
+    (a normal safe bootstrap registers nothing, so this stays False there)."""
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if not safe_worker_enabled():
+        return False
+    from hermes_cli.plugins import get_plugin_manager
+
+    return bool(get_plugin_manager()._hooks.get("pre_stop"))
+
+
+def get_pre_stop_directive(
+    *, session_id: str = "", platform: str = "", model: str = "", turn_id: str = "", task_id: str = "",
+    attempt: int = 0, max_attempts: int = 0, final_response: str = "",
+) -> tuple[str, str]:
+    """Aggregate ``pre_stop`` hooks into ``(action, message)`` with action ``"pass"``, ``"continue"``
+    or ``"unresolved"``. Any ``unresolved`` directive wins, then the first ``continue`` (or Claude-Code
+    Stop ``{"decision": "block", "reason"}``). A callback that raised or timed out made no decision,
+    so it is ``unresolved`` too (naming the callback, never its error text): unlike ``pre_verify`` this
+    gate does not fail open."""
+    from hermes_cli.plugins import _delivery_manager as _manager
+
+    if pre_stop_suppressed_by_policy():  # registered, but the immutable safe-worker policy never runs plugin hooks
+        return "unresolved", "a pre_stop check is registered but the worker policy disables plugin hooks, so the answer was not confirmed"
+    results, failed = _manager().invoke_hook_checked(
+        "pre_stop", session_id=session_id, platform=platform, model=model, turn_id=turn_id, task_id=task_id,
+        attempt=attempt, max_attempts=max_attempts, final_response=final_response,
+    )
+    if failed:
+        name = getattr(failed[0], "__name__", "callback")
+        return "unresolved", f"pre_stop plugin callback {name} failed or timed out, so the answer was not confirmed"
+    directives = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        action = str(result.get("action") or result.get("decision") or "").strip().lower()
+        message = result.get("message") or result.get("reason")
+        if isinstance(message, str) and message.strip():
+            directives.append((action, message.strip()))
+    for wanted in ("unresolved", "continue", "block"):
+        for action, message in directives:
+            if action == wanted:
+                return ("continue" if wanted == "block" else wanted), message
+    return "pass", ""
 
 
 def _policy_error_block_directive(hook_name: str, cb: Callable, exc: BaseException) -> dict[str, str]:
@@ -290,6 +338,17 @@ class PluginDispatchMixin:
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         return self._run_hook_callbacks(hook_name, self._hooks.get(hook_name, []), kwargs)
+
+    def invoke_hook_checked(self, hook_name: str, **kwargs: Any) -> tuple[list[Any], list[Callable]]:
+        """:meth:`invoke_hook` plus the callbacks that raised or timed out, for a gate that must not
+        read a failed callback as "no objection"."""
+        from agent.safe_worker_policy import safe_worker_enabled
+
+        if safe_worker_enabled():
+            return [], []
+        kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        failed: list[Callable] = []
+        return self._run_hook_callbacks(hook_name, self._hooks.get(hook_name, []), kwargs, failed), failed
 
     def _run_hook_callbacks(self, hook_name: str, callbacks: Any, kwargs: dict[str, Any],
                             failed: Optional[list] = None) -> list[Any]:
