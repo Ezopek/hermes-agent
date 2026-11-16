@@ -8,7 +8,9 @@ part of this guidance.
 ## Carried behaviours
 
 Behaviours this fork carries on top of upstream. At a later upstream sync, retire an entry
-once its retirement condition holds and drop the carried files and tests with it.
+once its retirement condition holds, and remove only that carry's changes and tests. The
+listed files are the main ones touched; many are shared with upstream code, so do not delete
+them wholesale.
 
 - **ElevenLabs voice options.** The ElevenLabs TTS provider accepts `language_code` and
   `voice_settings` from `config.yaml`. Files: `tools/tts_tool_providers.py`,
