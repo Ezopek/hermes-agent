@@ -56,6 +56,31 @@ class TestDotenvFallbackPerProvider:
 
             mock_import.return_value.assert_called_once_with(api_key="el-dotenv-key")
 
+    def test_elevenlabs_passes_language_and_voice_settings(self, tmp_path):
+        from tools import tts_tool
+
+        voice_settings = object()
+        with patch("hermes_cli.config.get_env_value", return_value="el-dotenv-key"), \
+             patch("tools.tts_tool_providers._make_elevenlabs_voice_settings", return_value=voice_settings), \
+             patch.object(tts_tool, "_import_elevenlabs") as mock_import:
+            mock_client = MagicMock()
+            mock_client.text_to_speech.convert.return_value = iter([b"audio"])
+            mock_import.return_value = MagicMock(return_value=mock_client)
+
+            tts_tool._generate_elevenlabs(
+                "cześć",
+                str(tmp_path / "out.mp3"),
+                {"elevenlabs": {
+                    "voice_id": "voice-pl", "model_id": "eleven_v3",
+                    "language_code": " pl ", "voice_settings": {"style": 0.5},
+                }},
+            )
+
+        mock_client.text_to_speech.convert.assert_called_once_with(
+            text="cześć", voice_id="voice-pl", model_id="eleven_v3",
+            output_format="mp3_44100_128", language_code="pl", voice_settings=voice_settings,
+        )
+
     def test_xai_reads_dotenv_key(self, tmp_path):
         """xAI TTS resolves credentials through ``tools.xai_http``, which reads the
         canonical ``hermes_cli.config.get_env_value`` — the dotenv contract from #17140.
