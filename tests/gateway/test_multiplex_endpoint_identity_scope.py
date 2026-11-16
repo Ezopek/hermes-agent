@@ -59,29 +59,17 @@ def test_matrix_homeserver_identity_follow_the_scoped_token(secondary_scope):
 
 
 @pytest.mark.asyncio
-async def test_matrix_standalone_send_posts_scoped_token_to_scoped_homeserver(secondary_scope, monkeypatch):
+async def test_matrix_standalone_send_never_posts_directly_with_a_scoped_token(secondary_scope, monkeypatch):
+    """Standalone Matrix sends go through the gateway owner; no second client carries the scoped token."""
     import aiohttp
     from plugins.platforms.matrix import adapter as mx
 
-    seen = {}
+    def _no_client(*a, **k):
+        raise AssertionError("standalone Matrix send must not open its own HTTP client")
 
-    class _Resp:
-        status = 200
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def json(self): return {"event_id": "$x"}
-        async def text(self): return ""
-
-    class _Sess:
-        def __init__(self, *a, **k): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        def put(self, url, **kw): seen["url"] = url; seen["headers"] = kw.get("headers", {}); return _Resp()
-
-    monkeypatch.setattr(aiohttp, "ClientSession", _Sess)
-    await mx._standalone_send(PlatformConfig(enabled=True), "!room:example", "hi")
-    assert seen["url"].startswith(SECONDARY["MATRIX_HOMESERVER"] + "/")
-    assert DEFAULT_ENV["MATRIX_HOMESERVER"] not in seen["url"]
+    monkeypatch.setattr(aiohttp, "ClientSession", _no_client)
+    result = await mx._standalone_send(PlatformConfig(enabled=True), "!room:example", "hi")
+    assert "error" in result
 
 
 def test_teams_credentials_pair_scoped_secret_with_scoped_app_identity(secondary_scope):
