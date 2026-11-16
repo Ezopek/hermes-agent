@@ -1393,6 +1393,10 @@ DEFAULT_CONFIG = {
         # notifications to the PARENT; false suppresses them (the child's result is the
         # deliverable). Async-delegation results are NEVER suppressed.
         "surface_child_process_notifications": False,
+        # Operator policy prepended to every child system prompt (inline text and/or a local
+        # UTF-8 file; combined cap 12000 chars). An unreadable file logs a warning, adds nothing.
+        "context_preamble": "",
+        "context_preamble_file": "",
     },
     # Ephemeral prefill messages file — JSON list of {role, content} dicts injected at the start of
     # every API call for few-shot priming. Never saved to sessions/logs/trajectories.
