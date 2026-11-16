@@ -13,16 +13,34 @@ from gateway.run_inbound import GatewayInboundMixin
 WEBM = b"\x1a\x45\xdf\xa3 fake webm"
 
 
+class _WebmResponse:
+    """Minimal aiohttp response: status, headers and a chunked body, as the download cap reads it."""
+    status, headers = 200, {}
+
+    def __init__(self, body):
+        self.content = self
+        self._body = body
+
+    def iter_chunked(self, _size):
+        async def chunks():
+            yield self._body
+        return chunks()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
 def _adapter(**extra):
     from plugins.platforms.mattermost.adapter import MattermostAdapter
     adapter = MattermostAdapter(PlatformConfig(enabled=True, token="t", extra={"url": "https://mm.example.com", **extra}))
     adapter._bot_user_id, adapter._bot_username = "bot_id", "hermes-bot"
     adapter.handle_message = AsyncMock()
     adapter._api_get = AsyncMock(return_value={"name": "voice.webm", "mime_type": "video/webm"})
-    resp = AsyncMock(status=200, read=AsyncMock(return_value=WEBM))
-    resp.__aenter__ = AsyncMock(return_value=resp)
-    resp.__aexit__ = AsyncMock(return_value=False)
-    adapter._session = MagicMock(get=MagicMock(return_value=resp))
+    adapter._session = MagicMock(get=MagicMock(return_value=_WebmResponse(WEBM)))
+    adapter.set_authorization_check(lambda *args, **kwargs: True)  # attachments are fetched only for an authorized sender
     return adapter
 
 
@@ -127,3 +145,14 @@ async def test_normal_posts_unchanged():
     adapter._api_get.return_value = {"name": "m.ogg", "mime_type": "audio/ogg"}
     await _run(adapter, _event("t3", ptype=None))
     assert adapter.handle_message.call_args[0][0].message_type is MessageType.VOICE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [False, None])
+async def test_voice_post_from_unauthorized_sender_downloads_nothing(verdict):
+    adapter = _adapter()
+    adapter.set_authorization_check(None if verdict is None else (lambda *args, **kwargs: verdict))
+    await _run(adapter, _event())
+    adapter._api_get.assert_not_called()  # only the gateway's explicit True spends the token on a sender's file
+    ev = adapter.handle_message.call_args[0][0]  # still dispatched, so the runner applies denial/pairing
+    assert ev.media_urls == [] and ev.message_type is MessageType.TEXT
