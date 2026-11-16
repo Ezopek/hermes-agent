@@ -686,23 +686,20 @@ class TestAnthropicOAuthFlag:
 
 
 class TestBuildCodexClient:
-    def test_pool_without_selected_entry_falls_back_to_auth_store(self):
+    def test_pool_without_selected_entry_refuses_singleton_for_requested_model(self):
         with (
             patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)),
-            # A present pool with no usable row reads auth.json directly (no re-selection that
-            # could pair another row's key with the default host, #121486).
-            patch("agent.auxiliary_client._read_codex_singleton_token", return_value="codex-auth-token"),
+            # Model-aware pool refusal binds the singleton too.
+            patch("agent.auxiliary_client._read_codex_singleton_token", return_value="codex-auth-token") as mock_singleton,
             patch("agent.auxiliary_client.OpenAI") as mock_openai,
         ):
-            mock_openai.return_value = MagicMock()
             from agent.auxiliary_client import _build_codex_client
 
             client, model = _build_codex_client("gpt-5.4")
 
-        assert client is not None
-        assert model == "gpt-5.4"
-        assert mock_openai.call_args.kwargs["api_key"] == "codex-auth-token"
-        assert mock_openai.call_args.kwargs["base_url"] == "https://chatgpt.com/backend-api/codex"
+        assert (client, model) == (None, None)
+        mock_singleton.assert_not_called()
+        mock_openai.assert_not_called()
 
     def test_profile_codex_base_url_overrides_pool_endpoint(self, monkeypatch):
         """Auxiliary Codex calls use the same profile endpoint override as the main client."""
@@ -771,7 +768,7 @@ class TestBuildCodexClient:
             def peek(self):
                 return self.entry
 
-            def select(self):
+            def select(self, *, model=None):
                 return self.entry
 
         pool = _Pool()
@@ -1134,7 +1131,7 @@ class TestGetTextAuxiliaryClient:
             def has_credentials(self):
                 return True
 
-            def select(self):
+            def select(self, *, model=None):
                 return _Entry()
 
         with (

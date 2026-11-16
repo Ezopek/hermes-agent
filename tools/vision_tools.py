@@ -927,21 +927,23 @@ async def vision_analyze_tool(
 
 
 def check_video_requirements() -> bool:
-    """True when ``call_llm(task="vision")`` could resolve a client.
-
-    Mirrors its fallback chain: explicit ``auxiliary.vision.provider``, then auto (main
-    provider → openrouter → nous) — without the auto step the tool would vanish whenever
-    the explicit name was unresolvable. Probe mode skips real SDK client construction.
-
-    See #31179.
-    """
-    from agent.auxiliary_client import aux_probe_mode, resolve_vision_provider_client
+    """Probe the same configured route and declared fallbacks as ``call_llm(task="vision")``."""
+    from agent.auxiliary_client import (
+        AuxiliaryClientUnavailable, _resolve_call_client, _resolve_task_provider_model, aux_probe_mode,
+    )
     # No blanket except: a resolver crash must reach the registry, which logs it with a
     # traceback; a swallowed exception reads as "no vision backend configured" (#87950).
     with aux_probe_mode():
-        return any(
-            resolve_vision_provider_client(**kw)[1] is not None for kw in ({}, {"provider": "auto"})
-        )
+        provider, model, base_url, api_key, api_mode = _resolve_task_provider_model("vision")
+        try:
+            _resolve_call_client(
+                "vision", provider=None, model=None, base_url=None, api_key=None,
+                resolved_provider=provider, resolved_model=model, resolved_base_url=base_url,
+                resolved_api_key=api_key, resolved_api_mode=api_mode, main_runtime=None, async_mode=False,
+            )
+        except AuxiliaryClientUnavailable:
+            return False
+    return True
 
 
 def check_vision_requirements() -> bool:
