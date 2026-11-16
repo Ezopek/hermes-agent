@@ -89,7 +89,8 @@ jobs:
           scripts/run_tests.sh tests/agent/ tests/gateway/ tests/tools/ \
             tests/hermes_cli/ tests/hermes_state/ tests/cron/ \
             tests/plugins/image_gen/test_codex_model_cooldowns.py \
-            tests/plugins/image_gen/test_openai_codex_provider.py
+            tests/plugins/image_gen/test_openai_codex_provider.py \
+            tests/plugins/platforms/matrix/
 
   gate:
     if: always()
