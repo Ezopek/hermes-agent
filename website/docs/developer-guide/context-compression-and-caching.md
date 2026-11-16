@@ -219,6 +219,22 @@ attempt anyway:
   gateway auto-reset that discards the whole session. A successful summary
   resets the budget; `abort_on_summary_failure: true` still hard-aborts every
   attempt.
+- **Summary skipped before any call → same policy.** Two situations skip the
+  summary model entirely and would otherwise commit the deterministic
+  fallback: the bench (`summary_model_benched`, after two consecutive fallback
+  summaries) and the feasibility skip (`feasibility_skip`, a tiny middle after
+  an ineffectiveness strike). With `abort_on_summary_failure: true` both abort
+  exactly like a failed call: the transcript is returned unchanged, nothing
+  rotates or commits, and the telemetry keeps the skip's own failure class.
+  The default (`false`) is unchanged. Tradeoff: an aborted attempt frees no
+  context, so a benched session stays frozen until the next probe succeeds,
+  `/compress`, or `/new`. Bounded recovery needs no reset: the bench arms a
+  persisted wall-clock deadline (`_ANTI_THRASH_RECOVERY_SECONDS`); the first
+  ordinary compaction after it lapses makes one real summary attempt. A healthy
+  summary resets the streak; a failure keeps the transcript and benches again.
+  The deadline and streak follow a physical rotation (`in_place: false`) from
+  the parent row, and a skipped-summary commit persists the streak onto the
+  child row so a rebuilt compressor does not start un-benched.
 - **Provider-proven overflow** — when the provider itself rejects the request
   with a context-length error, the recovery pass ignores the cooldown for one
   bounded attempt (`max_compression_attempts`) without clearing it. Deferring

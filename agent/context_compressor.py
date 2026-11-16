@@ -2369,6 +2369,7 @@ class ContextCompressor(
             previous_overload_aborts = _parent(
                 "get_compression_overload_streak", "compression parent overload streak", previous_overload_aborts,
             )
+            previous_probe_at = self._parent_fallback_probe_at(session_db, old_session_id, previous_probe_at)
         self.bind_session_state(session_db, session_id)
         if boundary_reason == "compression":
             # Rotation creates a fresh child row first; carry the streak until boundary bookkeeping persists it.
@@ -2427,9 +2428,6 @@ class ContextCompressor(
         if found:
             setattr(self, attr, default if value is None else value)
 
-    def _load_fallback_compression_streak(self) -> None:
-        self._load_durable("_fallback_compression_streak", "get_compression_fallback_streak", "compression fallback streak", int, 0)
-
     def _load_proactive_prune_rearm_tokens(self) -> None:
         """Restore the cache-boundary runway for a resumed durable session."""
         self._load_durable(
@@ -2440,9 +2438,6 @@ class ContextCompressor(
     def _clear_durable_proactive_prune_rearm(self) -> None:
         """Best-effort removal of the persisted prune-runway key; transcript untouched."""
         self._durable_write("patch_session_model_config", "proactive prune runway clear", {PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None})
-
-    def _persist_fallback_compression_streak(self) -> None:
-        self._durable_write("set_compression_fallback_streak", "compression fallback streak", self._fallback_compression_streak)
 
     def _load_consecutive_overload_aborts(self) -> None:
         """Restore the sustained-overload budget so a fresh compressor bound to a resumed session
@@ -2537,6 +2532,7 @@ class ContextCompressor(
                     "Compaction completed via pre-LLM summary skip; fallback_compression_streak unchanged (%d)",
                     self._fallback_compression_streak,
                 )
+            self._persist_fallback_compression_streak()  # the rotated child row must carry the bench
             return
         if used_fallback:
             self._fallback_compression_streak += 1
@@ -5540,6 +5536,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                 telemetry, compress_end - compress_start, scan.previous_summary_before,
             ):
                 return canonical_messages
+        elif self._abort_on_summary_skip(telemetry, compress_end - compress_start, scan.previous_summary_before):
+            return canonical_messages
         if not summary:
             summary = self._fallback_summary_for_window(
                 telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
