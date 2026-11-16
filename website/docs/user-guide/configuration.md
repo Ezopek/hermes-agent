@@ -2181,6 +2181,14 @@ agent:
 
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
+### Delegated child policy
+
+`delegation.context_preamble` and `delegation.context_preamble_file` add trusted
+operator policy to each child's system prompt. Inline text precedes the local UTF-8
+file, with a combined limit of 12,000 characters. An unreadable or undecodable file
+logs a warning and is skipped; inline policy remains. The task goal stays in the
+child's user turn.
+
 ### Turn liveness watchdog
 
 `agent.turn_liveness` bounds how long a conversation turn may make **no observable progress** before Hermes force-recovers it. The watchdog keys off the activity clock (the same signal that stamps API waits, stream tokens, and tool heartbeats — lease renewal never counts), so a turn that silently wedges mid-flight (observed as issue #95548: no tool execution, no API call, no error, but the session stays "busy" indefinitely) is surfaced loudly, interrupted so it unwinds as a retriable interrupted turn, and — when the interrupt cannot unwind the wedge — its durable turn lease stops renewing so stale-turn cleanup can reclaim the session instead of it hanging until the process is killed.

@@ -177,8 +177,29 @@ _NESTED_CHILDREN_NOTE = (
     "from the nesting depth; children at the maximum depth cannot delegate further. No parameter override is available."
 )
 
+def _load_context_preamble(cfg: Optional[dict]) -> str:
+    """Load bounded operator policy for delegated child prompts from trusted config."""
+    if not isinstance(cfg, dict):
+        return ""
+    chunks = []
+    inline = cfg.get("context_preamble")
+    if inline and str(inline).strip():
+        chunks.append(str(inline).strip())
+    file_value = cfg.get("context_preamble_file")
+    if file_value and str(file_value).strip():
+        path = os.path.expandvars(os.path.expanduser(str(file_value).strip()))
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                content = fh.read(12001).strip()
+            if content:
+                chunks.append(content[:12000])
+        except (OSError, UnicodeDecodeError):
+            logger.warning("Could not read delegation.context_preamble_file %r", path)
+    return "\n\n".join(chunks)[:12000].rstrip()
+
+
 def _build_child_system_prompt(
-    goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
+    goal: str, context: Optional[str] = None, *, context_preamble: Optional[str] = None, workspace_path: Optional[str] = None, role: str = "leaf",
     max_spawn_depth: int = 2, child_depth: int = 1,
 ) -> str:
     """Focused system prompt for a child agent. role='orchestrator' appends a delegation-capability block (modeled on
@@ -188,6 +209,8 @@ def _build_child_system_prompt(
     # Keeping it out of the system prompt avoids sending OAuth Anthropic the
     # same task in both roles, while preserving the normal user-turn contract.
     parts = ["You are a focused subagent working on a specific delegated task."]
+    if context_preamble and str(context_preamble).strip():
+        parts.append(f"\nPARENT / PROFILE POLICY:\n{str(context_preamble).strip()}")
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
