@@ -87,7 +87,9 @@ jobs:
           HERMES_TEST_FILE_TIMEOUT: '900'
         run: |
           scripts/run_tests.sh tests/agent/ tests/gateway/ tests/tools/ \
-            tests/hermes_cli/ tests/hermes_state/ tests/cron/
+            tests/hermes_cli/ tests/hermes_state/ tests/cron/ \
+            tests/plugins/image_gen/test_codex_model_cooldowns.py \
+            tests/plugins/image_gen/test_openai_codex_provider.py
 
   gate:
     if: always()
