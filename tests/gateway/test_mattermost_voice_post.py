@@ -7,7 +7,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.event import MessageType
-import gateway.run  # noqa: F401  # module-level like test_mattermost.py; _classify_inbound_media imports it lazily
+import gateway.run  # module-level like test_mattermost.py; _classify_inbound_media imports it lazily
 from gateway.run_inbound import GatewayInboundMixin
 
 WEBM = b"\x1a\x45\xdf\xa3 fake webm"
