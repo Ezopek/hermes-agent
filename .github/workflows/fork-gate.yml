@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -45,7 +45,7 @@ jobs:
 
   python:
     name: Python runtime (${{ matrix.slice }}/8)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -78,7 +78,7 @@ jobs:
   gate:
     if: always()
     needs: [checks, python]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every gate dependency to succeed
@@ -90,7 +90,7 @@ jobs:
   alarm:
     needs: gate
     if: failure() && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:
