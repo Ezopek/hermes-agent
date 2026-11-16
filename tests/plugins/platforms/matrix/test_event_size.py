@@ -2,8 +2,6 @@
 the text: sends, stream/progress edits at the adapter's advertised budget, and the standalone sender."""
 
 import json
-import sys
-import types
 
 import pytest
 
@@ -74,38 +72,15 @@ async def test_sends_and_budget_sized_edits_fit_one_event():
 @pytest.mark.asyncio
 async def test_standalone_sender_events_fit_one_event(monkeypatch):
     from plugins.platforms.matrix.adapter import DEFAULT_MAX_MESSAGE_LENGTH, _standalone_send
+    from tests.tools.test_matrix_sender_ownership import native_sdk_owner
 
-    payloads = []
-
-    class _Response:
-        status = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return None
-
-        async def json(self):
-            return {"event_id": f"$e{len(payloads)}"}
-
-    class _Session:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return None
-
-        def put(self, url, **kwargs):
-            payloads.append(kwargs["json"])
-            return _Response()
-
-    monkeypatch.setitem(sys.modules, "aiohttp", types.SimpleNamespace(ClientSession=_Session))
+    _runner, _adapter, wire = native_sdk_owner(monkeypatch, private=True)
     pconfig = PlatformConfig(enabled=True, token="syt_test_token", extra={"homeserver": "https://matrix.example.org"})
     # send_message chunks plugin platforms on characters at the registry's max_message_length.
     for name, text in _texts(DEFAULT_MAX_MESSAGE_LENGTH).items():
         result = await _standalone_send(pconfig, "!room:example.org", text[:DEFAULT_MAX_MESSAGE_LENGTH])
-        assert result["success"], (name, result)
+        assert result.get("success"), (name, result)
 
+    payloads = [event["content"] for event in wire]
     assert payloads
     assert [len(json.dumps(p, ensure_ascii=False)) for p in payloads if not _fits_one_event(p)] == []

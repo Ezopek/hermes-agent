@@ -3,6 +3,7 @@
 from pm import install_hint
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -408,44 +409,41 @@ async def _resolve_slack_user_target(token, chat_id):
         return None, _error(f"Slack DM resolution failed: {e}")
 
 
-# "ephemeral connect (may re-init E2EE per send, see #46310)",
-async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
-    """Matrix adapter send (native media preserved). Prefer the live gateway adapter's persistent
-    olm/megolm session: ephemeral per-send connects re-init E2EE and claim one-time keys, which
-    under bursts exhausts recipient OTKs and silently drops messages — ephemeral is cron-only.
-
-    When a live gateway adapter is available (i.e. the tool runs inside a running gateway), the persistent
-    connection is reused — one olm/megolm session for all sends. This avoids per-message E2EE re-init storms
-    that exhaust recipient OTKs and silently drop messages (issue #46310).
-    """
-    media_files = media_files or []
-    metadata = {"thread_id": thread_id} if thread_id else None
+async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None, force_document=False):
+    """Use the persistent Matrix owner for CLI, cron and in-process tool delivery."""
     from gateway.config import Platform
-    _, live_adapter = _live_adapter(Platform.MATRIX, lookup_failed_warning=(
-        "Matrix: live gateway adapter lookup failed; falling back to an "
-        "ephemeral connect (may re-init E2EE per send)"))
-    if live_adapter is not None:
-        # Owned by the gateway — must NOT be disconnected (return before the ephemeral ``finally``).
-        return await _matrix_send_core(live_adapter, chat_id, message, media_files, metadata)
-    try:
-        from plugins.platforms.matrix.adapter import MatrixAdapter
-    except ImportError:
-        return {"error": "Matrix dependencies not installed. Run: "
-                f"{install_hint('matrix')}"}
-    adapter = MatrixAdapter(pconfig)
-    try:
-        if not await adapter.connect():
-            return _error("Matrix connect failed")
-        return await _matrix_send_core(adapter, chat_id, message, media_files, metadata)
-    except Exception as e:
-        return _error(f"Matrix send failed: {e}")
-    finally:
-        with contextlib.suppress(Exception):
-            await adapter.disconnect()
+    from gateway.platforms.base import BasePlatformAdapter
+    from gateway.platform_send import send_via_owner
+    from tools.send_message_tool import _send_chunks
+    # Native IPC uses ASCII JSON: escaped Unicode can exceed its envelope even
+    # when the caller's character-sized chunk fits a Matrix event.
+    chunks = BasePlatformAdapter.truncate_message(message, 30_000, len_fn=lambda text: len(json.dumps(text))) or [""]
+    return await _send_chunks(chunks, lambda chunk, last: send_via_owner(
+        Platform.MATRIX, chat_id, chunk, media_files=media_files if last else [],
+        thread_id=thread_id, force_document=force_document))
 
 
-async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
-    """Core send logic shared by live and ephemeral Matrix adapters."""
+async def _matrix_send_text(adapter, chat_id, content, reply_to=None, metadata=None):
+    """Preserve uncertain SDK acceptance as a final SendResult, without exception data."""
+    from gateway.platforms.base import SendResult
+    if not content:
+        return SendResult(success=True)
+    last_event_id = None
+    for chunk in adapter.truncate_message(
+            adapter.format_message(content), adapter.max_message_length, len_fn=adapter.message_len_fn):
+        msg_content = adapter._build_text_message_content(chunk)
+        adapter._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
+        try:
+            last_event_id = await adapter._send_room_message(chat_id, msg_content)
+            logger.info("Matrix: sent event %s to %s", last_event_id, chat_id)
+        except Exception as exc:  # health: allow BLE001 -- SDK failure may follow acceptance; expose no exception data
+            logger.error("Matrix: send outcome unknown in %s (%s)", chat_id, type(exc).__name__)
+            return SendResult(success=False, error=adapter._UNKNOWN_SEND_ERROR)
+    return SendResult(success=True, message_id=last_event_id)
+
+
+async def _matrix_send_core(adapter, chat_id, message, media_files, metadata, force_document=False):
+    """Text and native media delivery executed only by the persistent owner."""
     last_result = None
     if message.strip():
         last_result = await adapter.send(chat_id, message, metadata=metadata)
@@ -455,7 +453,7 @@ async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
         if not os.path.exists(media_path):
             return _error(f"Media file not found: {media_path}")
         ext = os.path.splitext(media_path)[1].lower()
-        method, _ = _adapter_media_method(ext, (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS)
+        method, _ = _adapter_media_method(ext, (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS, force_document)
         last_result = await getattr(adapter, method)(chat_id, media_path, metadata=metadata)
         if not last_result.success:
             return _error(f"Matrix media send failed: {last_result.error}")

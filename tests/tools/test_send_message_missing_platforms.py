@@ -119,60 +119,38 @@ class TestSendMattermost:
 
 
 class TestSendMatrix:
-    def test_success(self):
-        resp = _make_aiohttp_resp(200, json_data={"event_id": "$abc123"})
-        session_ctx, session = _make_aiohttp_session(resp)
-
-        with patch("aiohttp.ClientSession", return_value=session_ctx), \
-             patch.dict(os.environ, {"MATRIX_HOMESERVER": "", "MATRIX_ACCESS_TOKEN": ""}, clear=False):
+    def test_success(self, monkeypatch):
+        from tests.tools.test_matrix_sender_ownership import native_sdk_owner
+        async def scenario():
+            _runner, adapter, wire = native_sdk_owner(monkeypatch, event_id="$abc123", private=True)
             extra = {"homeserver": "https://matrix.example.com"}
-            result = asyncio.run(_send_matrix("syt_tok", extra, "!room:example.com", "hello matrix"))
+            result = await _send_matrix("syt_tok", extra, "!room:example.com", "hello matrix")
+            assert result == {
+                "success": True, "platform": "matrix", "chat_id": "!room:example.com", "message_id": "$abc123"}
+            assert len(wire) == 1
+            request = wire[0]
+            assert request["method"] == "PUT"
+            assert request["path"].startswith("/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message/")
+            assert adapter._client.api.token == "synthetic-owner-token"
+            assert request["headers"]["Authorization"] == "Bearer synthetic-owner-token"
+            assert request["content"]["msgtype"] == "m.text"
+            assert request["content"]["body"] == "hello matrix"
+        asyncio.run(scenario())
 
-        assert result == {
-            "success": True,
-            "platform": "matrix",
-            "chat_id": "!room:example.com",
-            "message_id": "$abc123",
-        }
-        session.put.assert_called_once()
-        call_kwargs = session.put.call_args
-        url = call_kwargs[0][0]
-        assert url.startswith("https://matrix.example.com/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message/")
-        assert call_kwargs[1]["headers"]["Authorization"] == "Bearer syt_tok"
-        payload = call_kwargs[1]["json"]
-        assert payload["msgtype"] == "m.text"
-        assert payload["body"] == "hello matrix"
-
-
-    def test_txn_id_is_unique_across_calls(self):
-        """Each call should generate a distinct transaction ID in the URL."""
-        txn_ids = []
-
-        def capture(*args, **kwargs):
-            url = args[0]
-            txn_ids.append(url.rsplit("/", 1)[-1])
-            ctx = MagicMock()
-            ctx.__aenter__ = AsyncMock(return_value=_make_aiohttp_resp(200, json_data={"event_id": "$x"}))
-            ctx.__aexit__ = AsyncMock(return_value=False)
-            return ctx
-
-        session = MagicMock()
-        session.put = capture
-        session_ctx = MagicMock()
-        session_ctx.__aenter__ = AsyncMock(return_value=session)
-        session_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        extra = {"homeserver": "https://matrix.example.com"}
-
-        import time
-        with patch("aiohttp.ClientSession", return_value=session_ctx):
-            asyncio.run(_send_matrix("tok", extra, "!r:example.com", "first"))
-        time.sleep(0.002)
-        with patch("aiohttp.ClientSession", return_value=session_ctx):
-            asyncio.run(_send_matrix("tok", extra, "!r:example.com", "second"))
-
-        assert len(txn_ids) == 2
-        assert txn_ids[0] != txn_ids[1]
+    def test_txn_id_is_unique_across_calls(self, monkeypatch):
+        """Independent sends through one owner retain distinct real SDK transaction IDs."""
+        from tests.tools.test_matrix_sender_ownership import native_sdk_owner
+        async def scenario():
+            _runner, _adapter, wire = native_sdk_owner(monkeypatch, private=True)
+            extra = {"homeserver": "https://matrix.example.com"}
+            first = await _send_matrix("tok", extra, "!r:example.com", "first")
+            second = await _send_matrix("tok", extra, "!r:example.com", "second")
+            assert first["success"] and second["success"]
+            assert len(wire) == 2
+            assert [event["content"]["body"] for event in wire] == ["first", "second"]
+            txn_ids = [event["path"].rsplit("/", 1)[-1] for event in wire]
+            assert all(txn_ids) and txn_ids[0] != txn_ids[1]
+        asyncio.run(scenario())
 
 
 # ---------------------------------------------------------------------------
