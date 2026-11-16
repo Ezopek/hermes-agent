@@ -387,6 +387,15 @@ its authenticated local control socket and profile's adapter. An unreachable own
 or lost reply returns an error without opening another crypto client or automatically
 resending an operation whose delivery is uncertain.
 
+Generated Olm one-time keys are saved to the crypto store before their public halves
+are uploaded. If an upload fails or its response is lost, the next key share reuses
+the saved unpublished key IDs and public material, including after a restart. A
+confirmed upload marks the keys published and saves the account again. If that final
+save fails, the error is reported and the earlier private-key commit remains
+recoverable; no immediate retry loop is added. Keep the persistent crypto store intact.
+This durability behavior follows the [original contribution](https://github.com/NousResearch/hermes-agent/pull/101220)
+at [pinned revision 7894ad1](https://github.com/NousResearch/hermes-agent/commit/7894ad17615c1a49dd684a8a7fea1232a75abe47).
+
 Encrypted messages missing a session key wait up to 30 seconds for normal key import,
 with at most 64 events retained. Recovery keeps the original event identity and runs
 the usual authorization, startup and replay checks. Expiry, capacity and decryption

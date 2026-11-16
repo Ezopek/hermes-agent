@@ -1218,8 +1218,10 @@ class MatrixAdapter(BasePlatformAdapter):
                     crypto_store, crypto_db, _acct_id, _pickle_key):
                 logger.warning("Matrix: crypto pickle migration failed — E2EE may not work correctly")
             from plugins.platforms.matrix.adapter_crypto import _CryptoStateStore
+            from plugins.platforms.matrix.adapter_otk import share_keys_crash_safely
             crypto_state = _CryptoStateStore(state_store, self._joined_rooms, client)
             olm = OlmMachine(client, crypto_store, crypto_state)
+            olm._share_keys = share_keys_crash_safely.__get__(olm)
             olm.share_keys_min_trust = TrustState.UNVERIFIED
             olm.send_keys_min_trust = TrustState.UNVERIFIED
             await olm.load()
