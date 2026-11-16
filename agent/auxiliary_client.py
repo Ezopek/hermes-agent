@@ -1030,13 +1030,13 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
     return pool if pool and pool.has_credentials() else None
 
 
-def _select_pool_entry(provider: str) -> tuple[bool, Optional[Any]]:
+def _select_pool_entry(provider: str, *, model: Optional[str] = None) -> tuple[bool, Optional[Any]]:
     """Return (pool_exists_for_provider, selected_entry)."""
     pool = _load_pool_with_credentials(provider)
     if pool is None:
         return False, None
     try:
-        return True, pool.select()
+        return True, pool.select(model=model) if model else pool.select()
     except Exception as exc:
         logger.debug("Auxiliary client: could not select pool entry for %s: %s", provider, exc)
         return True, None
@@ -2103,13 +2103,13 @@ def _resolve_xai_oauth_for_aux() -> Optional[tuple[str, str]]:
     return _creds_pair(creds)
 
 
-def _resolve_codex_credential_and_base() -> tuple[Optional[str], str]:
+def _resolve_codex_credential_and_base(*, model: Optional[str] = None) -> tuple[Optional[str], str]:
     """``(token, base_url)`` taken from ONE authority, so a Codex key is only ever sent to the host
     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
     token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
     override = _codex_base_url_override()
-    pool_present, entry = _select_pool_entry("openai-codex")
+    pool_present, entry = _select_pool_entry("openai-codex", model=model) if model else _select_pool_entry("openai-codex")
     if pool_present:
         token = _pool_runtime_api_key(entry)
         if token:
@@ -2118,8 +2118,8 @@ def _resolve_codex_credential_and_base() -> tuple[Optional[str], str]:
             # Same route rule as the chat path (row URL, else ``model.base_url``); never empty.
             from hermes_cli.auth_codex import _codex_pool_route_base_url
             return token, _codex_pool_route_base_url(_pool_runtime_base_url(entry))
-    # No usable pool token: auth.json only (re-selecting could pair another row's key with the default).
-    return _read_codex_singleton_token(), override or _CODEX_AUX_BASE_URL
+    # Model-aware pool refusals bind the singleton too; legacy unscoped callers keep their fallback.
+    return (None if pool_present and model else _read_codex_singleton_token()), override or _CODEX_AUX_BASE_URL
 
 
 def _read_codex_singleton_token() -> Optional[str]:
