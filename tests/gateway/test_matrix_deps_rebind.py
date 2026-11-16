@@ -32,6 +32,8 @@ def _fake_mautrix_types():
 def fresh_dependency_boundary(monkeypatch):
     """Exercise the real importer after PM admits the SDK."""
     monkeypatch.setattr(pm_extras, "ensure_import", lambda *a, **kw: None)
+    # The scenario is a partial install; pin it so installed Matrix extras cannot skip the rebind path.
+    monkeypatch.setattr(pm_extras, "missing", lambda extra: ("asyncpg",))
     monkeypatch.delenv("MATRIX_E2EE_MODE", raising=False)
     monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
     # ensure_and_bind writes module globals; isolate even successful rebinding.
