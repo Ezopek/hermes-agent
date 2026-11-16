@@ -2963,17 +2963,17 @@ def _codex_base_url_override() -> str:
 
 
 def _build_codex_client(model: str) -> tuple[Optional[Any], Optional[str]]:
-    """CodexAuxiliaryClient for an explicit model; (None, None) without a Codex OAuth token.
-
-    No auto-selected default: the Codex model allow-list is undocumented and drifts.
-    """
+    """CodexAuxiliaryClient for an explicit model; no OAuth token → (None, None).
+    No auto-selected default: the Codex model allow-list is undocumented and drifts."""
     if not model:
         logger.warning(
             "Auxiliary client: openai-codex requested without a model; "
             "pass model explicitly (auxiliary.<task>.model in config.yaml)."
         )
         return None, None
-    codex_token, base_url = _resolve_codex_credential_and_base()
+    from agent.codex_responses_adapter import _wire_model_identity
+    codex_token, base_url = _resolve_codex_credential_and_base(
+        model=_wire_model_identity(_normalize_resolved_model(model, "openai-codex")))
     if not codex_token:
         return None, None
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
@@ -5035,7 +5035,9 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
     no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
     if req.raw_codex:
         # Raw OpenAI client for callers needing responses.stream() (main agent loop).
-        codex_token, base_url = _resolve_codex_credential_and_base()
+        from agent.codex_responses_adapter import _wire_model_identity
+        codex_token, base_url = _resolve_codex_credential_and_base(
+            model=_wire_model_identity(_normalize_resolved_model(model, req.provider)))
         if not codex_token:
             logger.warning(no_token_msg)
             return None, None
@@ -7374,8 +7376,7 @@ def _resolve_call_client(
     resolved_base_url: Optional[str], resolved_api_key: Optional[str],
     resolved_api_mode: Optional[str], main_runtime: Optional[dict[str, Any]], async_mode: bool,
 ) -> _ResolvedAuxRoute:
-    """Resolve the client for one aux call: vision chain, or cached text client with the
-    explicit-provider fallback_chain / auto-chain rescue; RuntimeError when nothing is configured."""
+    """Resolve an aux client; explicit vision providers use only declared task fallbacks."""
     effective_provider = resolved_provider
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7383,14 +7384,12 @@ def _resolve_call_client(
             model=resolved_model or model, base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key, async_mode=async_mode, main_runtime=main_runtime,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning("Vision provider %s unavailable, falling back to auto vision backends",
-                           resolved_provider)
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto", model=resolved_model, async_mode=async_mode,
-                main_runtime=main_runtime)
-        if client is not None:
-            resolved_provider = effective_provider or resolved_provider
+        if client is None and resolved_provider != "auto":
+            client, final_model, effective_provider = _try_configured_fallback_for_unavailable_client(
+                task, resolved_provider)
+            if client is not None and async_mode:
+                client, final_model = _to_async_client(client, final_model or "", is_vision=True)
+        resolved_provider = effective_provider or resolved_provider
     else:
         client, final_model = _get_cached_client(
             resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
