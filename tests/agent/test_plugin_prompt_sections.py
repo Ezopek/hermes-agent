@@ -89,7 +89,10 @@ def test_real_aiagent_freezes_section_within_life_and_rerenders_on_invalidate(mo
 
 def test_fresh_process_resume_restores_identical_full_prompt_without_callback(tmp_path):
     """The existing persisted full prompt is the only resume state required."""
-    db_path = tmp_path / "state.db"
+    # The session DB lives under the child's HERMES_HOME, as for a real profile: the configured
+    # orientation file is resolved under the session's owning home.
+    db_path = tmp_path / "hermes-home" / "state.db"
+    db_path.parent.mkdir()
     calls_path = tmp_path / "calls.txt"
     child = textwrap.dedent(
         """
