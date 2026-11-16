@@ -1,0 +1,103 @@
+name: Fork gate
+
+on:
+  pull_request:
+    branches: [ezop, upstream]
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [ezop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the fork workflow boundary
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          paths = [p for p in pathlib.Path('.github/workflows').iterdir() if p.is_file()]
+          assert paths and all(p.name.startswith('fork-') and p.suffix in {'.yml', '.yaml'} for p in paths), paths
+          PY
+      - name: Install Matrix encryption build headers
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libolm-dev
+      - name: Prepare the pinned test toolchain
+        id: pm
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain", "matrix", "messaging"]'
+      - name: Run the upstream static checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: '"$HERMES_PYTHON" scripts/check --base "$BASE_SHA"'
+
+  python:
+    name: Python runtime (${{ matrix.slice }}/8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slice: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Matrix encryption build headers
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libolm-dev
+      - name: Prepare the pinned test toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain", "matrix", "messaging"]'
+      - name: Run Python runtime and carried-behavior coverage
+        # This fork carries Python runtime fixes. Upstream CI/release, installer,
+        # frontend, container and real-service lanes remain separate coverage;
+        # they are not claimed by this hosted runtime gate.
+        env:
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/8
+          HERMES_TEST_WORKERS: '2'
+          HERMES_TEST_FILE_TIMEOUT: '900'
+        run: |
+          scripts/run_tests.sh tests/agent/ tests/gateway/ tests/tools/ \
+            tests/hermes_cli/ tests/hermes_state/ tests/cron/
+
+  gate:
+    if: always()
+    needs: [checks, python]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate dependency to succeed
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          PYTHON: ${{ needs.python.result }}
+        run: test "$CHECKS" = success && test "$PYTHON" = success
+
+  alarm:
+    needs: gate
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Report a failing trunk gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "gate failed on ezop at ${GITHUB_SHA::7}" \
+            --body "Gate run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
