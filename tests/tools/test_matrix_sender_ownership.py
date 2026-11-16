@@ -10,7 +10,7 @@ import pytest
 from gateway.config import Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from plugins.platforms.matrix.adapter import MatrixAdapter, _standalone_send
-from tools.send_message_senders import _send_matrix_via_adapter
+from gateway.outbound.senders import _send_matrix_via_adapter
 
 
 @pytest.fixture(autouse=True)
