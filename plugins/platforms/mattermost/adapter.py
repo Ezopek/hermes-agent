@@ -47,6 +47,7 @@ _RECONNECT_BASE_DELAY, _RECONNECT_MAX_DELAY, _RECONNECT_JITTER = 2.0, 60.0, 0.2 
 _POST_WITH_FILE_ERROR = "Failed to post with file"
 _MEDIA_MSG_TYPES = (("image/", MessageType.PHOTO), ("audio/", MessageType.VOICE))  # first match wins
 _INBOUND_CACHE_EXT = {"image/": ".png", "audio/": ".ogg"}  # mime prefix → default extension for cached media
+_VOICE_POST_TYPE = "custom_voice_message"  # mattermost-plugin-voice-message 2.0.1: audio rides in normal file_ids
 
 
 def _with_mentions_disabled(payload: dict[str, Any]) -> dict[str, Any]:
@@ -515,8 +516,9 @@ class MattermostAdapter(BasePlatformAdapter):
                 message_text = re.sub(re.escape(pattern), "", message_text, flags=re.IGNORECASE).strip()
         return message_text
 
-    async def _download_attachments(self, file_ids: list[str]) -> tuple[list[str], list[str]]:
-        """Download attachments now (URLs need auth headers downstream tools lack) → (paths, mime types)."""
+    async def _download_attachments(self, file_ids: list[str], *, voice_post: bool = False) -> tuple[list[str], list[str]]:
+        """Download attachments now (URLs need auth headers downstream tools lack) → (paths, mime types).
+        voice_post: Mattermost types audio-only recorder webm as video/webm; report it as audio so STT sees it."""
         import aiohttp
         from gateway.platforms.base import (
             cache_audio_from_bytes_async,
@@ -530,6 +532,8 @@ class MattermostAdapter(BasePlatformAdapter):
                 file_info = await self._api_get(f"files/{fid}/info")
                 fname = file_info.get("name", f"file_{fid}")
                 mime = file_info.get("mime_type", "application/octet-stream")
+                if voice_post and mime.startswith("video/webm"):
+                    mime = "audio/webm"
                 async with self._session.get(
                     f"{self._base_url}/api/v4/files/{fid}", headers=self._auth_header(),
                     timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -556,9 +560,13 @@ class MattermostAdapter(BasePlatformAdapter):
             post = json.loads(data.get("post") or "")
         except (json.JSONDecodeError, TypeError):
             return
-        # Ignore own messages, system posts and redeliveries.
+        # Ignore own messages, system/other typed posts (only the voice plugin's post is let through) and redeliveries.
         sender_id, post_id = post.get("user_id", ""), post.get("id", "")
-        if sender_id == self._bot_user_id or post.get("type") or self._dedup.is_duplicate(post_id):
+        voice_post = post.get("type") == _VOICE_POST_TYPE
+        if sender_id == self._bot_user_id or (post.get("type") and not voice_post) or self._dedup.is_duplicate(post_id):
+            return
+        file_ids = post.get("file_ids") or []
+        if voice_post and not (isinstance(file_ids, list) and file_ids):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
@@ -572,7 +580,9 @@ class MattermostAdapter(BasePlatformAdapter):
             thread_id = post_id
         if message_text[:1].isspace() and message_text.lstrip().startswith("/"):
             message_text = message_text.lstrip()
-        media_urls, media_types = await self._download_attachments(post.get("file_ids") or [])
+        media_urls, media_types = await self._download_attachments(file_ids, voice_post=voice_post)
+        if voice_post and not media_urls:  # every download failed: nothing to transcribe
+            return
         if message_text.startswith("/"):
             msg_type = MessageType.COMMAND
         elif media_types:
