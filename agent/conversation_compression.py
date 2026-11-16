@@ -3494,14 +3494,13 @@ def _candidate_rejected(
     if compressed == messages_before_compression or (
         _strip_marker_for_comparison(compressed) == _strip_marker_for_comparison(messages_before_compression)
     ):
-        logger.info(
-            "Compression made no progress (session=%s) — skipping boundary rewrite.", agent.session_id or "none"
-        )
+        logger.info("Compression made no progress (session=%s) — skipping boundary rewrite.", agent.session_id or "none")
         # Unchanged output would fail identically next turn; arm structural backoff so
         # auto-compress stops re-firing each turn (success lifts it, force overrides).
         with _swallow('no-progress backoff arm failed', exc_info=True):
             if callable(_recorder := getattr(agent.context_compressor, "_record_structural_no_op", None)):
                 _recorder("compaction returned the transcript unchanged (no_progress)")
+        agent._emit_warning("⚠ Compression made no progress. No messages were changed — conversation continues unchanged.")
         _emit_aborted_attempt_telemetry(agent, attempt.started_at, "no_progress", attempt.seed)
         return True
     if not compressed:

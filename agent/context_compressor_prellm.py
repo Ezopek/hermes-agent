@@ -36,6 +36,37 @@ class PreLlmSkipMixin:
             float, 0.0, _FALLBACK_PROBE_AT_MODEL_CONFIG_KEY, 0.0,
         )
 
+    def _parent_fallback_probe_at(self, session_db: Any, old_session_id: str, current: float) -> float:
+        """Bench deadline of the compression parent row. The rotation may rebind this compressor to the
+        empty child row before the notification, zeroing the in-memory value, so the parent row is the
+        authority for the window."""
+        found, value = self._durable_read(
+            "get_session_model_config_value", "compression parent probe deadline", float, 0.0,
+            _FALLBACK_PROBE_AT_MODEL_CONFIG_KEY, 0.0, session_db=session_db, session_id=old_session_id,
+        )
+        return value if found and value is not None else current
+
+    def _load_fallback_compression_streak(self) -> None:
+        self._load_durable("_fallback_compression_streak", "get_compression_fallback_streak", "compression fallback streak", int, 0)
+
+    def _persist_fallback_compression_streak(self) -> None:
+        self._durable_write("set_compression_fallback_streak", "compression fallback streak", self._fallback_compression_streak)
+
+    def _abort_on_summary_skip(
+        self, telemetry: dict[str, Any], n_skipped: int, previous_summary_before_scan: str | None,
+    ) -> bool:
+        """``abort_on_summary_failure=true`` preserves the transcript when the summary model is skipped
+        (benched or feasibility skip) exactly as when its call fails: a skip would otherwise replace
+        the middle with the static fallback. The skip's own failure class stays in the telemetry."""
+        if not self.abort_on_summary_failure:
+            return False
+        failure_class = telemetry.get("failure_class") or "feasibility_skip"
+        self._last_summary_error = f"summary skipped ({failure_class})"
+        self._abort_on_summary_failure(telemetry, n_skipped, previous_summary_before_scan)
+        telemetry["failure_class"] = failure_class  # the model was skipped, not failed
+        self._last_feasibility_skip = False
+        return True
+
     def _fallback_streak_skip(self, telemetry: dict[str, Any]) -> bool:
         """Pre-LLM skip while two summaries in a row fell back: compact deterministically instead of
         paying for a summary model that keeps failing (#63008). One probe per recovery window; a
