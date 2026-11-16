@@ -240,14 +240,26 @@ def build_otp_fills(otp_controls: list[ClassifiedLoginControl], code: str) -> li
     return [{"index": best.control.index, "token": "one-time-code", "value": code}]
 
 
+# Walk only the current document and its open shadow roots; never enter iframe documents.
+# Reused by inspection and mutation so nonce stamps resolve in the same search scope.
+_OPEN_DOM_ROOTS_JS = """const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    for (const element of roots[i].querySelectorAll("*")) {
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+    }
+  }"""
+
+
 def build_inspection_js(nonce: str) -> str:
-    return _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE.replace("__NONCE__", json.dumps(nonce))
+    return (_LOGIN_CONTROL_INSPECTION_JS_TEMPLATE.replace("__NONCE__", json.dumps(nonce))
+            .replace("__OPEN_DOM_ROOTS__", _OPEN_DOM_ROOTS_JS))
 
 
 _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
   const nonce = __NONCE__;
-  const elements = Array.from(document.querySelectorAll("input, select"));
-  const forms = Array.from(document.forms);
+  __OPEN_DOM_ROOTS__
+  const elements = roots.flatMap((root) => Array.from(root.querySelectorAll("input, select")));
+  const forms = roots.flatMap((root) => Array.from(root.querySelectorAll("form")));
   elements.forEach((element, index) => element.setAttribute("data-hermes-vault-slot", nonce + ":" + index));
   const out = elements.flatMap((element, index) => {
     if (element.disabled || element.readOnly) return [];
@@ -255,14 +267,16 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility === "hidden" || element.getClientRects().length === 0) return [];
     const labels = element.labels ? Array.from(element.labels, (l) => l.textContent || "") : [];
+    const root = element.getRootNode();
     const ariaText = (element.getAttribute("aria-labelledby") || "")
       .split(/\\s+/).filter(Boolean)
-      .map((id) => { const n = document.getElementById(id); return n ? (n.textContent || "") : ""; })
+      .map((id) => { const n = root.getElementById(id); return n ? (n.textContent || "") : ""; })
       .join(" ");
     const resolvedFormIndex = element.form ? forms.indexOf(element.form) : -1;
     return [{
       autocomplete: element.autocomplete || "",
-      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : null,
+      // Separate formless shadow scopes so split OTP digits cannot cross components.
+      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : (root === document ? null : -(roots.indexOf(root) + 1)),
       index,
       maxLength: element.maxLength > 0 ? element.maxLength : null,
       label: [
@@ -296,7 +310,8 @@ def build_fill_js(fills: list[dict[str, Any]], expected_origin: str, nonce: str 
         [{"index": f["index"], "token": f.get("token", "current-password"), "value": f["value"]} for f in fills]
     )
     return (_FILL_JS_TEMPLATE.replace("__EXPECTED_ORIGIN__", json.dumps(expected_origin))
-            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce)))
+            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce))
+            .replace("__OPEN_DOM_ROOTS__", _OPEN_DOM_ROOTS_JS))
 
 
 _FILL_JS_TEMPLATE = """(() => {
@@ -306,27 +321,29 @@ _FILL_JS_TEMPLATE = """(() => {
   }
   const fills = __FILLS__;
   const nonce = __NONCE__;
+  __OPEN_DOM_ROOTS__
   let filled = 0;
   const norm = (t) => String(t || "").trim().toLowerCase();
   for (const f of fills) {
-    const el = document.querySelector('[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]');
+    const selector = '[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]';
+    const el = roots.map((root) => root.querySelector(selector)).find(Boolean);
     if (!el || (f.token === "current-password" && el.type !== "password")) continue;
     try {
       if (el.tagName === "SELECT") {
         const want = norm(f.value);
         const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
-        if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
+        if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true, composed: true })); filled += 1; }
         continue;
       }
       el.focus();
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
       // one-time-code split into single-character boxes: f.value is the slice for THIS box (see build_otp_fills)
       if (setter && setter.set) { setter.set.call(el, f.value); } else { el.value = f.value; }
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText" }));
+      el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       if (el.value.length > 0) filled += 1;
     } catch (e) { /* skip */ }
   }
-  document.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
+  roots.forEach((root) => root.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot")));
   return JSON.stringify({ filled });
 })()"""
