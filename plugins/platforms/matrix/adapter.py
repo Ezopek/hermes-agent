@@ -51,7 +51,7 @@ from agent.i18n import t
 from agent.secret_scope import get_secret
 from gateway.platforms._shared import (
     apply_yaml_bridge as _apply_yaml_bridge, extra_or_secret as _extra_or_secret,
-    get_scoped_secret as _get_scoped_secret, send_error
+    get_scoped_secret as _get_scoped_secret
 )
 
 try:
@@ -800,6 +800,7 @@ class MatrixAdapter(BasePlatformAdapter):
     # Class-level defaults keep object.__new__-built test instances working.
     max_message_length = DEFAULT_MAX_MESSAGE_LENGTH
     _SPLIT_THRESHOLD = DEFAULT_MAX_MESSAGE_LENGTH - 100
+    _UNKNOWN_SEND_ERROR = "Matrix delivery outcome unknown; do not retry automatically"
 
     @property
     def message_len_fn(self):
@@ -1307,111 +1308,32 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.warning("Matrix: initial sync error: %s", exc)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        self._device_id_unverified = False
-        if self._client is not None:
-            try:
-                await self.disconnect()
-            except Exception as exc:
-                logger.warning("Matrix: error disconnecting before reconnect: %s", exc)
-        from mautrix.api import HTTPAPI
-        from mautrix.client import Client
-        from mautrix.client.state_store import MemoryStateStore, MemorySyncStore
-        if not self._homeserver:
-            logger.error("Matrix: homeserver URL not configured")
-            return False
-        # Resolved here, inside the profile scope, so multiplexed profiles never share it.
-        self._resolve_store_dir().mkdir(parents=True, exist_ok=True)
-        client_session = _create_matrix_session(self._proxy_url)
-        api = HTTPAPI(base_url=self._homeserver, token=self._access_token or "", client_session=client_session)
-        state_store = MemoryStateStore()
-        sync_store = MemorySyncStore()
-        client = Client(
-            mxid=UserID(self._user_id) if self._user_id else UserID(""), device_id=self._device_id or None,
-            api=api, state_store=state_store, sync_store=sync_store)
-        self._client = client
-        if not await self._connect_authenticate(client, api):
-            return False
-        if self._encryption and not await self._connect_setup_e2ee(client, api, state_store):
-            return False
-        from mautrix.client import InternalEventType as IntEvt
-        from mautrix.client.dispatcher import MembershipEventDispatcher
-        client.add_dispatcher(MembershipEventDispatcher)  # without this INVITE never fires
-        client.add_event_handler(EventType.ROOM_MESSAGE, self._on_room_message, wait_sync=True)
-        client.add_event_handler(EventType.REACTION, self._on_reaction, wait_sync=True)
-        client.add_event_handler(IntEvt.INVITE, self._on_invite, wait_sync=True)
-        self._startup_ts = time.time()
-        self._reset_clock_skew_detector()  # a reconnect after an NTP fix starts clean
-        self._closing = False
-        await self._connect_initial_sync(client)
-        if self._encryption and getattr(client, "crypto", None):
-            try:
-                await client.crypto.share_keys()
-            except Exception as exc:
-                logger.warning("Matrix: initial key share failed: %s", exc)
-        self._sync_task = asyncio.create_task(self._sync_loop())
-        self._mark_connected()
-        self._wire_plugin_handlers(self._client)  # plugin-registered native handlers
-        return True
+        from plugins.platforms.matrix.adapter_crypto import connect_crypto_owner
+        return await connect_crypto_owner(self, is_reconnect=is_reconnect)
 
     async def disconnect(self) -> None:
-        self._closing = True
-        if self._sync_task and not self._sync_task.done():
-            self._sync_task.cancel()
-            try:
-                await self._sync_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        for tasks in (self._invite_join_tasks.values(), self._reaction_redaction_tasks):
-            pending = list(tasks)
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-        self._invite_join_tasks.clear()
-        self._reaction_redaction_tasks.clear()
-        if getattr(self, "_crypto_db", None):
-            try:
-                await self._crypto_db.stop()
-            except Exception as exc:
-                logger.debug("Matrix: could not close crypto DB on disconnect: %s", exc)
-        if self._client:
-            with suppress(Exception):
-                await self._client.api.session.close()
-            self._client = None
-        logger.info("Matrix: disconnected")
+        from plugins.platforms.matrix.adapter_crypto import disconnect_crypto_owner
+        await disconnect_crypto_owner(self)
 
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        if not content:
-            return SendResult(success=True)
-        last_event_id = None
-        for chunk in self.truncate_message(
-                self.format_message(content), self.max_message_length, len_fn=self.message_len_fn):
-            msg_content = self._build_text_message_content(chunk)
-            self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
-            try:
-                last_event_id = await self._send_room_message(chat_id, msg_content)
-                logger.info("Matrix: sent event %s to %s", last_event_id, chat_id)
-            except Exception as exc:
-                if not (self._encryption and getattr(self._client, "crypto", None)):
-                    logger.error("Matrix: failed to send to %s: %s", chat_id, exc)
-                    return SendResult(success=False, error=str(exc))
-                try:  # E2EE error: retry once after sharing keys
-                    await self._client.crypto.share_keys()
-                    last_event_id = await self._send_room_message(chat_id, msg_content)
-                    logger.info("Matrix: sent event %s to %s (after key share)", last_event_id, chat_id)
-                except Exception as retry_exc:
-                    logger.error("Matrix: failed to send to %s after retry: %s", chat_id, retry_exc)
-                    return SendResult(success=False, error=str(retry_exc))
-        return SendResult(success=True, message_id=last_event_id)
+        from tools.send_message_senders import _matrix_send_text
+        return await _matrix_send_text(self, chat_id, content, reply_to, metadata)
+
+    async def send_platform_message(self, chat_id, message, *, media_files, thread_id, force_document=False):
+        from tools.send_message_senders import _matrix_send_core
+        return await _matrix_send_core(self, chat_id, message, media_files,
+                                       {"thread_id": thread_id} if thread_id else None, force_document)
 
     async def _send_room_message(self, chat_id: str, msg_content: dict[str, Any]) -> str:
         """Send one m.room.message event (45s cap) and return its event ID as str."""
         event_id = await asyncio.wait_for(
             self._client.send_message_event(RoomID(chat_id), EventType.ROOM_MESSAGE, msg_content), timeout=45)
         return str(event_id)
+
+    def _send_retry_is_final(self, result: SendResult) -> bool:
+        return result.error == self._UNKNOWN_SEND_ERROR
 
     async def create_handoff_thread(self, parent_chat_id: str, name: str) -> Optional[str]:
         """Post a seed message and return its ``event_id`` as the handoff ``thread_id``. Matrix has
@@ -1451,6 +1373,7 @@ class MatrixAdapter(BasePlatformAdapter):
             "e2ee": {
                 "mode": self._e2ee_mode, "enabled": bool(self._encryption), "deps_available": _check_e2ee_deps(),
                 "crypto_store_path": str(self._crypto_db_path),
+                "ingress": self._crypto_ingress.diagnostics() if getattr(self, "_crypto_ingress", None) else None,
                 "recovery_key_configured": bool(_scoped_recovery_key().strip())},
             "policy": {
                 "allowed_user_count": len(self._allowed_user_ids), "allowed_room_count": len(self._allowed_room_ids),
@@ -1830,8 +1753,8 @@ class MatrixAdapter(BasePlatformAdapter):
         try:
             event_id = await self._client.send_message_event(RoomID(room_id), EventType.ROOM_MESSAGE, msg_content)
             return SendResult(success=True, message_id=str(event_id))
-        except Exception as exc:
-            return SendResult(success=False, error=str(exc))
+        except Exception:  # health: allow BLE001 -- SDK failure may follow acceptance; expose no exception data
+            return SendResult(success=False, error=self._UNKNOWN_SEND_ERROR)
 
     async def _send_local_file(
         self, room_id: str, file_path: str, msgtype: str, caption: Optional[str] = None,
@@ -3112,63 +3035,9 @@ class MatrixAdapter(BasePlatformAdapter):
 
 
 async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_files=None, force_document=False):
-    """standalone_sender_fn: out-of-process delivery via the Client-Server API (cron without gateway)."""
-    extra = getattr(pconfig, "extra", {}) or {}
-    try:
-        import aiohttp
-    except ImportError:
-        return send_error("aiohttp not installed. Run: pip install aiohttp")
-    try:
-        # In-turn reads inside an installed secret scope: honor get_secret, no env fallback — for the
-        # homeserver too, so the scoped token is never sent to the default profile's server.
-        homeserver = (extra.get("homeserver") or get_secret("MATRIX_HOMESERVER", "") or "").rstrip("/")
-        token = getattr(pconfig, "token", None) or get_secret("MATRIX_ACCESS_TOKEN", "") or ""
-        if not homeserver or not token:
-            return send_error("Matrix not configured (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN required)")
-        from urllib.parse import quote
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        # asyncio.wait_for, not aiohttp.ClientTimeout: cron invokes this via
-        # run_coroutine_threadsafe ("Timeout context manager should be used inside a task").
-        async with aiohttp.ClientSession() as session:
-            async def _do_send(payload):
-                txn_id = f"hermes_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
-                url = f"{homeserver}/_matrix/client/v3/rooms/{quote(chat_id, safe='')}/send/m.room.message/{txn_id}"
-                async with session.put(url, headers=headers, json=payload) as resp:
-                    if resp.status not in {200, 201}:
-                        return send_error(f"Matrix API error ({resp.status}): {await resp.text()}")
-                    data = await resp.json()
-                    return {"success": True, "platform": "matrix", "chat_id": chat_id,
-                            "message_id": data.get("event_id")}
-            for payload in _standalone_payloads(message):
-                try:
-                    result = await asyncio.wait_for(_do_send(payload), timeout=30)
-                except TimeoutError:
-                    return send_error("Matrix API timeout (30s)")
-                if not result.get("success"):
-                    return result
-            return result
-    except Exception as e:
-        return send_error(f"Matrix send failed: {e}")
-
-
-def _standalone_payloads(message: str) -> list[dict[str, Any]]:
-    """One m.room.message content per chunk. The caller chunks on characters, and a chunk of
-    non-Latin text can still exceed the homeserver's byte cap, so re-chunk on UTF-8 bytes."""
-    _md = None
-    with suppress(ImportError):
-        import markdown as _md
-    payloads = []
-    for chunk in BasePlatformAdapter.truncate_message(message, MATRIX_MAX_MESSAGE_LENGTH_CEILING, _utf8_len):
-        payload = {"msgtype": "m.text", "body": chunk}
-        if _md is not None:
-            tokenized, tex_store = _latex_to_tokens(chunk)
-            html = _md.markdown(tokenized, extensions=["fenced_code", "tables"])
-            formatted = {"format": "org.matrix.custom.html", "formatted_body": _tokens_to_mx_maths(
-                re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html), tex_store)}
-            if _content_bytes({**payload, **formatted}) <= _MAX_CONTENT_BYTES:
-                payload.update(formatted)
-        payloads.append(payload)
-    return payloads
+    """Registered CLI/cron sender: dispatch through the persistent gateway owner."""
+    from tools.send_message_senders import _send_matrix_via_adapter
+    return await _send_matrix_via_adapter(pconfig, chat_id, message, media_files, thread_id, force_document)
 
 
 def interactive_setup() -> None:

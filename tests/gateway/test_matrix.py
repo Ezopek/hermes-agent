@@ -1542,8 +1542,8 @@ class TestMatrixDiagnostics:
 
 class TestMatrixEncryptedSendFallback:
     @pytest.mark.asyncio
-    async def test_send_retries_after_e2ee_error(self):
-        """send() should retry with crypto.share_keys() on E2EE errors."""
+    async def test_send_does_not_blindly_resend_after_e2ee_error(self):
+        """An ambiguous failure must not upload account keys or resend a new transaction."""
         adapter = _make_adapter()
         adapter._encryption = True
 
@@ -1559,10 +1559,11 @@ class TestMatrixEncryptedSendFallback:
 
         result = await adapter.send("!room:example.org", "hello")
 
-        assert result.success is True
-        assert result.message_id == "$event123"
-        mock_crypto.share_keys.assert_awaited_once()
-        assert fake_client.send_message_event.await_count == 2
+        assert result.success is False
+        assert result.message_id is None
+        assert "unknown" in result.error and "do not retry automatically" in result.error
+        mock_crypto.share_keys.assert_not_awaited()
+        assert fake_client.send_message_event.await_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2640,45 +2641,29 @@ class TestMatrixReconnectDisconnect:
 
     @pytest.mark.asyncio
     async def test_connect_calls_disconnect_when_client_already_set(self):
-        """When self._client is set, connect() should call disconnect() first."""
+        """Reconnect closes the old session before authenticating the replacement client."""
+        from mautrix.client import Client
+        from plugins.platforms.matrix.adapter import _create_matrix_session
         adapter = _make_adapter()
-
-        adapter._client = MagicMock()
-        adapter._client.api = MagicMock()
-        adapter._client.api.session = MagicMock()
-        adapter._client.api.session.close = AsyncMock()
-        adapter._client.whoami = AsyncMock()
-
-        adapter.disconnect = AsyncMock()
-
-        fake_mautrix_mods = _make_fake_mautrix()
-
-        mock_client = MagicMock()
-        mock_client.mxid = "@bot:example.org"
-        mock_client.device_id = None
-        mock_client.state_store = MagicMock()
-        mock_client.sync_store = MagicMock()
-        mock_client.crypto = None
-        mock_client.whoami = AsyncMock(return_value=MagicMock(
-            user_id="@bot:example.org", device_id="NEW_DEV",
-        ))
-        mock_client.query_keys = AsyncMock()
-        mock_client.sync = AsyncMock(return_value={"rooms": {"join": {"!room:server": {}}}})
-        mock_client.add_event_handler = MagicMock()
-        mock_client.handle_sync = MagicMock(return_value=[])
-        mock_client.api = MagicMock()
-        mock_client.api.token = "syt_test_access_token"
-        mock_client.api.session = MagicMock()
-        mock_client.api.session.close = AsyncMock()
-
-        fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
-
-        with patch.dict("sys.modules", fake_mautrix_mods):
-            with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
-                with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
-                    await adapter.connect()
-
-        adapter.disconnect.assert_awaited_once()
+        old_session = _create_matrix_session(None)
+        adapter._client = types.SimpleNamespace(api=types.SimpleNamespace(session=old_session))
+        async def whoami():
+            assert old_session.closed
+            return types.SimpleNamespace(user_id="@bot:example.org", device_id="NEW_DEV")
+        new_session = None
+        try:
+            with patch.object(Client, "whoami", AsyncMock(side_effect=whoami)), patch.object(
+                Client, "sync", AsyncMock(return_value={"next_batch": "synthetic"})
+            ), patch.object(adapter, "_refresh_dm_cache", AsyncMock()), patch.object(adapter, "_sync_loop", AsyncMock()):
+                assert await adapter.connect()
+                new_session = adapter._client.api.session
+                assert old_session.closed and not new_session.closed
+                assert new_session is not old_session
+                Client.whoami.assert_awaited_once()
+        finally:
+            await adapter.disconnect()
+            await old_session.close()
+        assert new_session.closed
 
 
 class TestDeviceIdRecoveryOnReconnect:

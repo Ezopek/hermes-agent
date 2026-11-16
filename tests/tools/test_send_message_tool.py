@@ -632,99 +632,49 @@ class TestMatrixMediaLiveAdapterReuse:
     """Verify _send_matrix_via_adapter reuses the live gateway adapter
     when available, avoiding per-message E2EE re-init storms (#46310)."""
 
-    def test_live_adapter_skips_connect_disconnect(self, tmp_path):
-        """When a live gateway adapter exists, no connect() or disconnect()
-        should be called — the persistent E2EE session is reused."""
+    def test_live_adapter_skips_connect_disconnect(self, tmp_path, monkeypatch):
+        """The live owner sends native chunks and media with thread metadata, without reconnecting."""
+        from plugins.platforms.matrix.adapter import MatrixAdapter
+        from tests.tools.test_matrix_sender_ownership import native_sdk_owner
         img_path = tmp_path / "photo.png"
         img_path.write_bytes(b"\x89PNG\r\n")
+        async def scenario():
+            runner, adapter, wire = native_sdk_owner(monkeypatch)
+            adapter.max_message_length = 100
+            adapter.send_image_file = AsyncMock(return_value=SimpleNamespace(success=True, message_id="$img"))
+            with patch.object(MatrixAdapter, "connect", AsyncMock()) as connect, patch.object(
+                MatrixAdapter, "disconnect", AsyncMock()
+            ) as disconnect:
+                result = await _send_matrix_via_adapter(
+                    SimpleNamespace(enabled=True, token="tok", extra={}), "!room:example.com",
+                    "here is an image\n" + "details\n" * 80, media_files=[(str(img_path), False)], thread_id="$thread")
+                assert result["success"] is True
+                assert result["message_id"] == "$img"
+                assert len(wire) > 1
+                assert "here is an image" in wire[0]["content"]["body"]
+                assert all(event["loop"] is runner._gateway_loop for event in wire)
+                assert all(event["content"]["m.relates_to"]["event_id"] == "$thread" for event in wire)
+                adapter.send_image_file.assert_awaited_once_with(
+                    "!room:example.com", str(img_path), metadata={"thread_id": "$thread"})
+                connect.assert_not_awaited()
+                disconnect.assert_not_awaited()
+        asyncio.run(scenario())
 
-        calls = []
-
-        class LiveAdapter:
-            async def send(self, chat_id, message, metadata=None):
-                calls.append(("send", chat_id, message))
-                return SimpleNamespace(success=True, message_id="$text")
-
-            async def send_image_file(self, chat_id, path, metadata=None):
-                calls.append(("send_image_file", chat_id, path))
-                return SimpleNamespace(success=True, message_id="$img")
-
-        live_adapter = LiveAdapter()
-        fake_runner = SimpleNamespace(
-            adapters={Platform.MATRIX: live_adapter}
-        )
-
-        with patch(
-            "gateway.run._gateway_runner_ref",
-            return_value=fake_runner,
-        ), patch.dict(
-            sys.modules, {"plugins.platforms.matrix.adapter": SimpleNamespace()}
-        ):
-            result = asyncio.run(
-                _send_matrix_via_adapter(
-                    SimpleNamespace(enabled=True, token="tok", extra={}),
-                    "!room:example.com",
-                    "here is an image",
-                    media_files=[(str(img_path), False)],
-                )
-            )
-
-        assert result["success"] is True
-        assert result["message_id"] == "$img"
-        # Only send + send_image_file; no connect / disconnect
-        assert calls == [
-            ("send", "!room:example.com", "here is an image"),
-            ("send_image_file", "!room:example.com", str(img_path)),
-        ]
-
-    def test_live_adapter_not_available_falls_back_to_ephemeral(self, tmp_path):
-        """When _gateway_runner_ref returns None, the ephemeral adapter
-        path (connect + disconnect) is used as before."""
+    def test_live_adapter_not_available_refuses_without_second_client(self, tmp_path, monkeypatch):
+        """An unreachable owner produces an error without constructing an ephemeral SDK adapter."""
         doc_path = tmp_path / "doc.pdf"
         doc_path.write_bytes(b"%PDF-1.4")
-
-        calls = []
-
-        class EphemeralAdapter:
-            def __init__(self, _config):
-                pass
-
-            async def connect(self):
-                calls.append(("connect",))
-                return True
-
-            async def send(self, chat_id, message, metadata=None):
-                calls.append(("send", chat_id, message))
-                return SimpleNamespace(success=True, message_id="$txt")
-
-            async def send_document(self, chat_id, path, metadata=None):
-                calls.append(("send_document", chat_id, path))
-                return SimpleNamespace(success=True, message_id="$doc")
-
-            async def disconnect(self):
-                calls.append(("disconnect",))
-
-        fake_module = SimpleNamespace(MatrixAdapter=EphemeralAdapter)
-
-        with patch(
-            "gateway.run._gateway_runner_ref", return_value=None
-        ), patch.dict(sys.modules, {"plugins.platforms.matrix.adapter": fake_module}):
-            result = asyncio.run(
-                _send_matrix_via_adapter(
-                    SimpleNamespace(enabled=True, token="tok", extra={}),
-                    "!room:example.com",
-                    "report attached",
-                    media_files=[(str(doc_path), False)],
-                )
-            )
-
-        assert result["success"] is True
-        assert calls == [
-            ("connect",),
-            ("send", "!room:example.com", "report attached"),
-            ("send_document", "!room:example.com", str(doc_path)),
-            ("disconnect",),
-        ]
+        async def unavailable(*args, **kwargs):
+            raise FileNotFoundError("synthetic owner unavailable")
+        monkeypatch.setattr(asyncio, "to_thread", unavailable)
+        with patch("gateway.run._gateway_runner_ref", return_value=None), patch(
+            "plugins.platforms.matrix.adapter.MatrixAdapter", side_effect=AssertionError("second client forbidden")
+        ) as adapter_type:
+            result = asyncio.run(_send_matrix_via_adapter(
+                SimpleNamespace(enabled=True, token="tok", extra={}), "!room:example.com", "report attached",
+                media_files=[(str(doc_path), False)]))
+        assert "owner" in result["error"].lower()
+        adapter_type.assert_not_called()
 
 # ---------------------------------------------------------------------------
 # HTML auto-detection in Telegram send

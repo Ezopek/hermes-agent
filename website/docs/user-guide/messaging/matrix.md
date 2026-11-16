@@ -381,6 +381,19 @@ brew install libolm
 sudo dnf install libolm-devel
 ```
 
+Each crypto store and bot device has one live owner. Keep the persistent gateway
+running for standalone cron and `send_message` text/media delivery: these sends use
+its authenticated local control socket and profile's adapter. An unreachable owner
+or lost reply returns an error without opening another crypto client or automatically
+resending an operation whose delivery is uncertain.
+
+Encrypted messages missing a session key wait up to 30 seconds for normal key import,
+with at most 64 events retained. Recovery keeps the original event identity and runs
+the usual authorization, startup and replay checks. Expiry, capacity and decryption
+failures are logged and counted in Matrix diagnostics. Integrity/replay errors are
+terminal; a key starting at a later message index cannot recover an earlier message.
+Hermes does not request keys from arbitrary devices to fill these gaps.
+
 ### Enable E2EE
 
 Add to your `~/.hermes/.env`:
