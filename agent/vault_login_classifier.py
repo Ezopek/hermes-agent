@@ -253,6 +253,7 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
   // would leave its controls ungrouped (formIndex null) and merge split OTP boxes across forms.
   const elements = [];
   const forms = [];
+  const shadowScopes = [];
   (function walk(root) {
     for (const e of root.querySelectorAll("*")) {
       if (e.tagName === "INPUT" || e.tagName === "SELECT") elements.push(e);
@@ -272,9 +273,13 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
       .map((id) => { const r = element.getRootNode(); const n = (r.getElementById ? r.getElementById(id) : null) || document.getElementById(id); return n ? (n.textContent || "") : ""; })
       .join(" ");
     const resolvedFormIndex = element.form ? forms.indexOf(element.form) : -1;
+    // Formless controls in different shadow roots get distinct negative group ids, so split
+    // one-time-code boxes of one component are never merged with another component's.
+    const scope = element.getRootNode();
+    if (scope !== document && !shadowScopes.includes(scope)) shadowScopes.push(scope);
     return [{
       autocomplete: element.autocomplete || "",
-      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : null,
+      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : (scope === document ? null : -(shadowScopes.indexOf(scope) + 1)),
       index,
       maxLength: element.maxLength > 0 ? element.maxLength : null,
       label: [
