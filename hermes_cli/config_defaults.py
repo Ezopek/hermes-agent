@@ -1092,6 +1092,8 @@ DEFAULT_CONFIG = {
         "elevenlabs": {
             "voice_id": "pNInz6obpgDQGcFmaJgB",  # Adam
             "model_id": "eleven_multilingual_v2",
+            "language_code": "",  # optional ISO 639-1 hint ("pl"); blank auto-detects
+            "voice_settings": {},  # stability, similarity_boost, style, speed, etc.
         },
         "openai": {
             "model": "gpt-4o-mini-tts",

@@ -216,14 +216,50 @@ def _elevenlabs_environment_kwargs(el_config: dict[str, Any]) -> dict[str, Any]:
     return {"environment": ElevenLabsEnvironment(base=base_url, wss=wss_url)}
 
 
+_ELEVENLABS_VOICE_SETTING_KEYS = frozenset({
+    "stability", "similarity_boost", "style", "use_speaker_boost", "speed",
+})
+
+
+def _make_elevenlabs_voice_settings(el_config: dict[str, Any]) -> Any:
+    """Build ElevenLabs voice settings from nested or legacy flat config.
+
+    A non-empty ``voice_settings`` mapping wins. ``None`` or ``{}`` (what ``load_config`` merges
+    in from DEFAULT_CONFIG when the user set nothing nested) falls back to the legacy flat keys.
+    """
+    raw_settings = el_config.get("voice_settings")
+    if raw_settings is None or raw_settings == {}:
+        raw_settings = {
+            key: el_config[key] for key in _ELEVENLABS_VOICE_SETTING_KEYS if key in el_config
+        }
+    if raw_settings in (None, {}):
+        return None
+    if not isinstance(raw_settings, dict):
+        raise ValueError("tts.elevenlabs.voice_settings must be a mapping")
+    try:
+        from elevenlabs import VoiceSettings
+    except ImportError:
+        return dict(raw_settings)
+    return VoiceSettings(**raw_settings)
+
+
 def _generate_elevenlabs(text: str, output_path: str, tts_config: dict[str, Any]) -> str:
     api_key = _require_key("ELEVENLABS_API_KEY", "elevenlabs", "Get one at https://elevenlabs.io/")
     el_config = tts_config.get("elevenlabs") or {}
     client = _origin()._import_elevenlabs()(api_key=api_key, **_elevenlabs_environment_kwargs(el_config))
-    audio_generator = client.text_to_speech.convert(
-        text=text, voice_id=el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
-        model_id=el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID),
-        output_format="opus_48000_64" if output_path.endswith(".ogg") else "mp3_44100_128")
+    convert_kwargs = {
+        "text": text,
+        "voice_id": el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
+        "model_id": el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID),
+        "output_format": "opus_48000_64" if output_path.endswith(".ogg") else "mp3_44100_128",
+    }
+    language_code = el_config.get("language_code")
+    if isinstance(language_code, str) and language_code.strip():
+        convert_kwargs["language_code"] = language_code.strip()
+    voice_settings = _make_elevenlabs_voice_settings(el_config)
+    if voice_settings is not None:
+        convert_kwargs["voice_settings"] = voice_settings
+    audio_generator = client.text_to_speech.convert(**convert_kwargs)
     with open(output_path, "wb") as f:
         f.writelines(audio_generator)
     return output_path

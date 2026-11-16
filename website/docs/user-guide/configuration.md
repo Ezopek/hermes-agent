@@ -2207,6 +2207,8 @@ tts:
   elevenlabs:
     voice_id: "pNInz6obpgDQGcFmaJgB"
     model_id: "eleven_multilingual_v2"
+    language_code: ""          # Optional ISO 639-1 hint; blank auto-detects
+    voice_settings: {}         # stability, similarity_boost, style, use_speaker_boost, speed
   openai:
     model: "gpt-4o-mini-tts"
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
