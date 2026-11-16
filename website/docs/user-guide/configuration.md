@@ -2181,6 +2181,22 @@ agent:
 
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
+### Local Wiki orientation
+
+Load a local UTF-8 bootstrap into the session's context tier:
+
+```yaml
+wiki:
+  orientation_file: knowledge/bootstrap.md
+```
+
+Relative paths resolve under the owning profile's Hermes home; absolute paths and `~`
+are supported. Unset or `null` adds no orientation. The file is read once per session,
+including when project context files are skipped. Changes to the file or setting wait
+for a new session; `/new` on a reused agent reads it again. A configured missing,
+unreadable, empty or invalid file adds a `WIKI_ORIENTATION_ERROR` block and reports
+one status warning per session. Fix the setting or file and start a new session.
+
 ### Delegated child policy
 
 `delegation.context_preamble` and `delegation.context_preamble_file` add trusted
