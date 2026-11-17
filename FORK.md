@@ -153,18 +153,20 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
    git merge --no-ff "$TAG_COMMIT" -m "merge: upstream $TAG"
    ```
 
-3. **Check before every push of the candidate.** All three must pass; any failure means
-   do not push.
+3. **Check before every push of the candidate.** The chain stops at the first failing
+   check and prints `checks passed` only if all three succeed; anything else means do not push.
 
    ```bash
-   git fetch origin
+   git fetch origin &&
    # the mirror is exactly the release tag commit
-   test "$(git rev-parse origin/upstream)" = "$TAG_COMMIT"
+   test "$(git rev-parse origin/upstream)" = "$TAG_COMMIT" &&
    # the candidate contains the current ezop head
-   git merge-base --is-ancestor origin/ezop HEAD
+   git merge-base --is-ancestor origin/ezop HEAD &&
    # .github/workflows holds only fork-* files, and at least one
-   files=$(git ls-tree -r --name-only HEAD .github/workflows)
-   test -n "$files" && ! printf '%s\n' "$files" | grep -qvE '^\.github/workflows/fork-[^/]+\.ya?ml$'
+   files=$(git ls-tree -r --name-only HEAD .github/workflows) &&
+   test -n "$files" &&
+   ! printf '%s\n' "$files" | grep -qvE '^\.github/workflows/fork-[^/]+\.ya?ml$' &&
+   echo "checks passed"
    ```
 
 4. **Review.** Open the pull request against `upstream`, not `ezop`:
@@ -194,6 +196,7 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
    gate:
 
    ```bash
+   git fetch origin
    MERGE=$(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)
    test "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "<reviewed head>^{tree}")"
    gh api "repos/<owner>/<repo>/commits/$MERGE/check-runs" \
@@ -209,11 +212,11 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
 
 Step 5 relies on the gate result for the reviewed head, so the result of `fork-gate.yml` has
 to depend on the tree and not on where it runs. Do not make a job or step behave differently
-by base branch or event type. The one input that is not the tree is the base commit that the
-static-check step passes to the diff-based guards (the code-health ratchet and the blob-size
-check); this is why the review base is `upstream`, so those guards judge the fork's delta.
-The gate run on `ezop` after the merge sees a different base and is checked separately in
-step 6.
+by pull request base, base branch or event type. The diff-based guards in the static checks
+(the code-health ratchet and the blob-size check) therefore always compare against the
+`upstream` mirror, not against the pull request base or the previous head of a push. The
+result then depends only on the tree and on the mirror, which step 3 pins to the release tag
+commit.
 
 ### Not covered
 
