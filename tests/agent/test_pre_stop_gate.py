@@ -273,7 +273,15 @@ def test_registry_failure_in_the_loop_never_publishes_the_candidate(agent, monke
     _register(monkeypatch)
     _script(agent, "unchecked candidate")
 
-    with patch("hermes_cli.lifecycle.has_hook", side_effect=RuntimeError("registry down")):
+    from hermes_cli.lifecycle import has_hook
+
+    def registry_down_for_pre_stop(name, *args, **kwargs):
+        # Only the stop gate's registry read fails; other lifecycle checks in the loop keep working.
+        if name == "pre_stop":
+            raise RuntimeError("registry down")
+        return has_hook(name, *args, **kwargs)
+
+    with patch("hermes_cli.lifecycle.has_hook", side_effect=registry_down_for_pre_stop):
         result = agent.run_conversation("summarise the topic")
 
     assert result["final_response"].startswith("Unresolved")
