@@ -124,6 +124,9 @@ def test_slack_dm_resolution_error_never_echoes_the_proxy_password(monkeypatch):
                 "NO_PROXY", "no_proxy", "SLACK_PROXY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://bob:S3cretPW@127.0.0.1:notaport")
+    # With aiohttp-socks installed (the matrix extra) its connector rejects the URL with a plain
+    # ValueError before aiohttp builds it; hide it so the aiohttp InvalidURL path runs everywhere.
+    monkeypatch.setitem(sys.modules, "aiohttp_socks", None)
     chat_id, error = asyncio.run(_resolve_slack_user_target("xoxb-test", "user:U123"))
     assert chat_id is None
     assert error["error"].startswith("Slack DM resolution failed: ")

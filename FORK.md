@@ -88,6 +88,13 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   attachments are fetched only for a sender the gateway explicitly authorized, like any other
   attachment. File: `plugins/platforms/mattermost/adapter.py`. Retire when upstream's
   Mattermost adapter supports both. Disposition: adapt.
+- **Slack proxy-password test independent of `aiohttp-socks`.** The upstream test
+  `tests/gateway/outbound/test_send_message_slack.py::test_slack_dm_resolution_error_never_echoes_the_proxy_password`
+  expects `InvalidURL`, which only holds without `aiohttp-socks`. The gate installs the
+  `matrix` extra, which brings it in; its connector then rejects the malformed proxy URL with a
+  plain `ValueError`. The product code is unaffected (the password is redacted either way), so
+  the test hides `aiohttp_socks` and keeps both assertions. Retire when upstream's test no
+  longer depends on that package being absent.
 
 ## Running the gate locally
 
