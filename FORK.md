@@ -103,3 +103,120 @@ The gate is a staged bootstrap, not full qualification.
 - Provisional: the suite is inherited from upstream and has not been reviewed for this
   fork. Any test excluded from the gate is named, with its reason, next to the exclusion
   in the workflow file.
+
+## Release sync
+
+How an upstream stable release is brought into `ezop`. This is a manual procedure for the
+operator, or for a delegate the operator names. It is not an automated or agent-driven
+delivery mode; agents only prepare its inputs (the candidate branch, carry dispositions and
+tests). `ezop` keeps its history: nothing is rebased or force-pushed, and each release lands
+as one merge commit.
+
+### Branches
+
+- `upstream` is the raw mirror of upstream and the review base. Only the operator moves it,
+  and only to the exact commit of the release tag.
+- `ezop` is the fork trunk, where the change lands.
+- Nobody pushes upstream tags or any other upstream ref to the fork.
+
+Before moving `upstream`, read the workflows in the release tree and decide which of them
+could run on the fork: their triggers, the secrets they use and the permissions they ask for.
+Pushing the branch is what lets them run.
+
+### Procedure
+
+Set the release first. `source` below is a remote that points at the upstream repository, not
+at the fork. Fetching the tag into a local ref does not publish it.
+
+```bash
+TAG=<release tag>
+git fetch --no-tags source "refs/tags/$TAG:refs/tags/$TAG"
+TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
+```
+
+1. **Move the mirror** (operator only), after the workflow check above. This must be a
+   fast-forward; if `origin` rejects it, stop and sort that out before going on.
+
+   ```bash
+   git push origin "$TAG_COMMIT:refs/heads/upstream"
+   ```
+
+2. **Make the candidate.** Branch from `ezop` and merge the tag commit with a merge commit.
+   Resolve conflicts in that merge. Carry adaptations (retiring or adapting entries under
+   [Carried behaviours](#carried-behaviours), and removing every upstream workflow file so
+   only `fork-*` files remain) go in further commits on top. The candidate is never rebased
+   or force-pushed; if `ezop` moves, merge `origin/ezop` into it.
+
+   ```bash
+   git fetch origin
+   git switch -c "sync/$TAG" origin/ezop
+   git merge --no-ff "$TAG_COMMIT" -m "merge: upstream $TAG"
+   ```
+
+3. **Check before every push of the candidate.** All three must pass; any failure means
+   do not push.
+
+   ```bash
+   git fetch origin
+   # the mirror is exactly the release tag commit
+   test "$(git rev-parse origin/upstream)" = "$TAG_COMMIT"
+   # the candidate contains the current ezop head
+   git merge-base --is-ancestor origin/ezop HEAD
+   # .github/workflows holds only fork-* files, and at least one
+   files=$(git ls-tree -r --name-only HEAD .github/workflows)
+   test -n "$files" && ! printf '%s\n' "$files" | grep -qvE '^\.github/workflows/fork-[^/]+\.ya?ml$'
+   ```
+
+4. **Review.** Open the pull request against `upstream`, not `ezop`:
+
+   ```bash
+   git push origin "sync/$TAG"
+   gh pr create --base upstream --head "sync/$TAG" --title "merge: upstream $TAG"
+   ```
+
+   Never arm auto-merge while the base is `upstream`: it would merge into the mirror. Wait
+   for a green `gate` and a green `xreview` on the head. The review covers only
+   `git diff origin/upstream...<head>`, the fork's delta; it does not re-review upstream.
+
+5. **Land.** Re-run the checks in step 3 (fetch first). Then retarget and merge with a merge
+   commit, not rebase or squash:
+
+   ```bash
+   gh pr edit <PR> --base ezop
+   gh pr merge <PR> --merge
+   ```
+
+   The merge relies on the `gate` and `xreview` already green on the reviewed head; a fresh
+   gate run is not needed as evidence. If another review round is needed after retargeting,
+   switch the base back first (`gh pr edit <PR> --base upstream`) and only then push.
+
+6. **After the merge.** Compare the landed tree with the reviewed one and check the trunk
+   gate:
+
+   ```bash
+   MERGE=$(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)
+   test "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "<reviewed head>^{tree}")"
+   gh api "repos/<owner>/<repo>/commits/$MERGE/check-runs" \
+     --jq '.check_runs[] | select(.name=="gate") | .conclusion'
+   ```
+
+   A tree difference means `ezop` moved and the landed tree is not the one that was
+   reviewed: stop and look at what changed. The gate on `ezop` must be `success`. Record the
+   tag, the tag commit, the reviewed head, the merge commit, the tree comparison and the
+   gate result, on the pull request or wherever the operator keeps sync records.
+
+### Constraint on the gate
+
+Step 5 relies on the gate result for the reviewed head, so the result of `fork-gate.yml` has
+to depend on the tree and not on where it runs. Do not make a job or step behave differently
+by base branch or event type. The one input that is not the tree is the base commit that the
+static-check step passes to the diff-based guards (the code-health ratchet and the blob-size
+check); this is why the review base is `upstream`, so those guards judge the fork's delta.
+The gate run on `ezop` after the merge sees a different base and is checked separately in
+step 6.
+
+### Not covered
+
+- How GitHub counts an earlier check run on a head after its pull request base changes.
+- A race where `ezop` moves after the last check in step 5. The tree comparison in step 6
+  detects it; nothing prevents it.
