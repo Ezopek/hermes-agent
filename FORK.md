@@ -76,7 +76,9 @@ python -m pm.build_env --source . --out .venv --group dev --group test \
   --extra matrix --extra messaging
 export HERMES_PYTHON="$PWD/.venv/bin/python"
 
-"$HERMES_PYTHON" scripts/check --base origin/ezop        # the static checks
+# the static checks, as the gate runs them (see "Constraint on the gate")
+"$HERMES_PYTHON" scripts/check \
+  --base "$(python3 .github/fork-gate-base.py origin/ezop origin/upstream)"
 
 # One slice of the Python runtime job (N is 1..8); the gate runs all eight.
 HERMES_TEST_SLICE=N/8 HERMES_TEST_WORKERS=2 HERMES_TEST_FILE_TIMEOUT=900 \
@@ -190,10 +192,11 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
 
    The merge relies on the `gate` and `xreview` already green on the reviewed head; a fresh
    gate run is not needed as evidence of that tree. Retargeting does start a new `gate` run
-   (the `edited` trigger), and its two diff-based guards now judge the change against `ezop`
-   (see [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge.
-   The gate is never loosened to get a landing through; fix it with a commit on the
-   candidate.
+   (the `edited` trigger), and its two diff-based guards now judge the change against `ezop`,
+   skipping files identical to `upstream` (see
+   [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge: the
+   finding is in a file the fork owns. The gate is never loosened to get a landing through;
+   fix it with a commit on the candidate.
 
    For any new review round after retargeting, whatever the reason (a red `edited` run,
    `ezop` having moved, a review finding), switch the base back first
@@ -227,13 +230,25 @@ Step 5 relies on the gate result for the reviewed head, so no job or step in
 on the tree, with one deliberate exception: the two diff-based guards in the static checks
 (the code-health ratchet and the blob-size check) take the pull request base, or the
 previous head on a push, as the base they compare against. This keeps the fork's own
-baseline enforced on ordinary pull requests.
+baseline enforced on ordinary pull requests. The `alarm` job is not an exception: it runs
+only on push, after `gate` has finished, and cannot change `gate`'s result.
+
+Those guards judge only what the fork owns. A file whose mode and content at the head equal
+the same path in `origin/upstream` is upstream's code, so its findings never count. The step
+treats every run the same way: `.github/fork-gate-base.py` builds a local commit that is the
+real base except that each such file already holds its head content, so the file shows no
+diff, and `scripts/check` gets that commit as `--base`. Every other file is still judged
+against the real base, so growing a file the fork modified fails as before. The script reads
+`origin/upstream` and stops the step if that ref is missing. Because those files come from
+the head, the `ENFORCEMENT` switch and the known-environment-variable set are read from the
+head's copy wherever the fork's file equals upstream's.
 
 For a release sync that means:
 
 - On the sync pull request (base `upstream`) they judge the fork's delta against `upstream`.
 - After retargeting to `ezop` (the `edited` run) and after the merge (the push run) they
-  judge the change against `ezop`, which can find things the reviewed run did not.
+  judge the fork's delta against `ezop`. Files identical to `upstream` are skipped, so only
+  fork-owned files can turn the run red.
 - A red gate at either point blocks the landing or flags it, like any other red gate. Fix it
   with a commit on the candidate and review again with the base `upstream` (step 4); never
   loosen the gate.
