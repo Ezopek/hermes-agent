@@ -7,9 +7,6 @@ docs of config.yaml.
 from hermes_cli.config_defaults_auxiliary import _aux
 from hermes_cli.config_defaults_voice import VOICE_DEFAULTS
 
-from hermes_cli.config_defaults_aux import _aux
-
-
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
 #: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
 #: (the 3.14 pin shipped between the two without a migration); a saved config still holding one
