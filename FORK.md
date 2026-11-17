@@ -59,6 +59,12 @@ them wholesale.
   audio-only `video/webm` attachment is reported as audio so speech-to-text accepts it. File:
   `plugins/platforms/mattermost/adapter.py`. Retire when upstream's Mattermost adapter
   supports both.
+- **Compress-restart FIFO journey test does not assume which turn compacts.** The turn that
+  trips the preflight compaction threshold depends on the system prompt's size, so on some
+  hosted runners it is one turn earlier and the test's `PRESSURE_1` expectation failed. The
+  test now checks that each follower request starts with the committed compacted
+  transcript. File: `tests/gateway/test_journey_compress_restart_fifo.py`. Retire when
+  upstream's version of the test no longer depends on the compaction turn.
 
 ## Running the gate locally
 
