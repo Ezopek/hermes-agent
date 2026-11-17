@@ -2071,6 +2071,9 @@ def _resolve_codex_credential_and_base(model: Optional[str] = None) -> tuple[Opt
     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
     token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
     override = _codex_base_url_override()
+    if model:  # cooldowns are keyed by the wire model, so a context-variant alias shares its base model's
+        from agent.codex_responses_adapter import _wire_model_identity
+        model = _wire_model_identity(_normalize_resolved_model(model, "openai-codex"))
     pool_present, entry = _select_pool_entry("openai-codex", model)  # a model-scoped cooldown spares siblings
     if pool_present:
         token = _pool_runtime_api_key(entry)
