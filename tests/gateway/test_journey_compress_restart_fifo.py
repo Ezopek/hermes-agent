@@ -194,11 +194,14 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         order = [r['text'] for r in peer.requests if r['model'] == 'original' and r['text'] in FOLLOWERS]
         assert order == list(FOLLOWERS), order
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
+        compacted = [str(content).strip() for _, _, content in before['compacted']]
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
-            # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
-            turns = [str(m.get('content', '')) for m in json.loads(wire)]
-            assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            # Which turn trips the preflight threshold depends on the system prompt's size, so the compacted
+            # turns are read from the committed child, not assumed: every follower request starts with it.
+            turns = [str(m.get('content', '')).strip() for m in json.loads(wire)][1:]
+            assert turns[:len(compacted)] == compacted, (name, turns)
+            assert any('SUMMARY_RETAINED_FACTS' in turn for turn in turns[:len(compacted)]), name
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)
