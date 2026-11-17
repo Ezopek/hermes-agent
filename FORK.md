@@ -189,34 +189,49 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
    ```
 
    The merge relies on the `gate` and `xreview` already green on the reviewed head; a fresh
-   gate run is not needed as evidence. If another review round is needed after retargeting,
-   switch the base back first (`gh pr edit <PR> --base upstream`) and only then push.
+   gate run is not needed as evidence of that tree. Retargeting does start a new `gate` run
+   (the `edited` trigger), and its two diff-based guards now judge the change against `ezop`
+   (see [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge
+   (or, if the pull request already merged, treat the landing as failed). The fix is a
+   commit on the candidate and a new review round with the base switched back first
+   (`gh pr edit <PR> --base upstream`), then pushing. The gate is never loosened to get a
+   landing through.
 
 6. **After the merge.** Compare the landed tree with the reviewed one and check the trunk
    gate:
 
    ```bash
-   git fetch origin
-   MERGE=$(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)
-   test "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "<reviewed head>^{tree}")"
+   git fetch origin &&
+   MERGE=$(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid) &&
+   if [ "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "<reviewed head>^{tree}")" ]
+   then echo "tree: match"; else echo "tree: MISMATCH"; false; fi &&
    gh api "repos/<owner>/<repo>/commits/$MERGE/check-runs" \
      --jq '.check_runs[] | select(.name=="gate") | .conclusion'
    ```
 
-   A tree difference means `ezop` moved and the landed tree is not the one that was
-   reviewed: stop and look at what changed. The gate on `ezop` must be `success`. Record the
+   `tree: MISMATCH` stops the sequence. It means `ezop` moved and the landed tree is not the
+   one that was reviewed: look at what changed before anything else. Otherwise the gate on
+   `ezop` must print `success`. Record the
    tag, the tag commit, the reviewed head, the merge commit, the tree comparison and the
    gate result, on the pull request or wherever the operator keeps sync records.
 
 ### Constraint on the gate
 
-Step 5 relies on the gate result for the reviewed head, so the result of `fork-gate.yml` has
-to depend on the tree and not on where it runs. Do not make a job or step behave differently
-by pull request base, base branch or event type. The diff-based guards in the static checks
-(the code-health ratchet and the blob-size check) therefore always compare against the
-`upstream` mirror, not against the pull request base or the previous head of a push. The
-result then depends only on the tree and on the mirror, which step 3 pins to the release tag
-commit.
+Step 5 relies on the gate result for the reviewed head, so no job or step in
+`fork-gate.yml` may behave differently by base branch or event type. The result then depends
+on the tree, with one deliberate exception: the two diff-based guards in the static checks
+(the code-health ratchet and the blob-size check) take the pull request base, or the
+previous head on a push, as the base they compare against. This keeps the fork's own
+baseline enforced on ordinary pull requests.
+
+For a release sync that means:
+
+- On the sync pull request (base `upstream`) they judge the fork's delta against `upstream`.
+- After retargeting to `ezop` (the `edited` run) and after the merge (the push run) they
+  judge the change against `ezop`, which can find things the reviewed run did not.
+- A red gate at either point blocks the landing or flags it, like any other red gate. Fix it
+  with a commit on the candidate and review again with the base `upstream` (step 4); never
+  loosen the gate.
 
 ### Not covered
 

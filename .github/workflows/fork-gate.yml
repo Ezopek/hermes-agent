@@ -38,11 +38,10 @@ jobs:
         with:
           test-environment: 'true'
           extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain", "matrix", "messaging"]'
-      # The diff-based guards always judge the fork's delta against the upstream mirror, never
-      # against the pull request base or the push's previous head, so the result does not
-      # depend on the event (FORK.md, Release sync).
       - name: Run the upstream static checks
-        run: '"$HERMES_PYTHON" scripts/check --base origin/upstream'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: '"$HERMES_PYTHON" scripts/check --base "$BASE_SHA"'
 
   python:
     name: Python runtime (${{ matrix.slice }}/8)
