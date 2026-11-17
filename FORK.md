@@ -191,11 +191,16 @@ TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
    The merge relies on the `gate` and `xreview` already green on the reviewed head; a fresh
    gate run is not needed as evidence of that tree. Retargeting does start a new `gate` run
    (the `edited` trigger), and its two diff-based guards now judge the change against `ezop`
-   (see [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge
-   (or, if the pull request already merged, treat the landing as failed). The fix is a
-   commit on the candidate and a new review round with the base switched back first
-   (`gh pr edit <PR> --base upstream`), then pushing. The gate is never loosened to get a
-   landing through.
+   (see [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge.
+   The gate is never loosened to get a landing through; fix it with a commit on the
+   candidate.
+
+   For any new review round after retargeting, whatever the reason (a red `edited` run,
+   `ezop` having moved, a review finding), switch the base back first
+   (`gh pr edit <PR> --base upstream`) and only then push. A pull request that has already
+   merged cannot be retargeted: if the gate on `ezop` turns out red after the merge, merge
+   `origin/ezop` into the candidate, fix it there, and open a new pull request against
+   `upstream` (step 4).
 
 6. **After the merge.** Compare the landed tree with the reviewed one and check the trunk
    gate:
