@@ -14,6 +14,7 @@ _SEND_TIMEOUT = 55.0
 _IPC_TIMEOUT = 60.0
 _MAX_ACTIVE = 16
 _UNKNOWN = {"error": "Gateway owner delivery outcome unknown; do not retry automatically"}
+_SHARED_BOT_REFUSED = {"error": "Profile shares the default profile's bot and no gateway.profile_routes entry routes this target to it"}
 _FIELDS = {"profile_id", "platform", "chat_id", "message", "media_files", "thread_id", "force_document"}
 
 
@@ -100,7 +101,7 @@ async def send_on_owner_loop(runner, adapter, params):
     return await _on_loop(loop, _deliver(adapter, params))
 
 
-async def _send_authorized(runner, params):
+async def _send_authorized(runner, params, check_target=True):
     from gateway.config import Platform
     from gateway.session_authorities import authority_for_profile_id, owner_scope
     if getattr(runner, "_draining", False):
@@ -114,6 +115,9 @@ async def _send_authorized(runner, params):
         adapter = runner._authorization_adapter(Platform(params["platform"]), profile)
         if adapter is None:
             return {"error": "Gateway owner has no adapter for requested profile"}
+        if check_target and not runner._shared_bot_target_allowed(
+                Platform(params["platform"]), profile, params["chat_id"], params["thread_id"]):
+            return dict(_SHARED_BOT_REFUSED)
         return await send_on_owner_loop(runner, adapter, params)
 
 
@@ -154,7 +158,13 @@ async def send_via_owner(platform, chat_id, message, *, media_files=None, thread
         from gateway.run import _gateway_runner_ref
         runner = _gateway_runner_ref()
         if runner is not None:
-            return await _on_loop(getattr(runner, "_gateway_loop", None), _send_authorized(runner, params))
+            # The shared-bot target rule reads the calling turn's session context, which does not
+            # follow the call onto the owner loop: decide here, then deliver.
+            from hermes_cli.profiles import get_active_profile_name
+            if not runner._shared_bot_target_allowed(platform, get_active_profile_name(), chat_id, thread_id):
+                return dict(_SHARED_BOT_REFUSED)
+            return await _on_loop(getattr(runner, "_gateway_loop", None),
+                                  _send_authorized(runner, params, check_target=False))
         # This exchange verifies the native peer and resolves a served profile's control home.
         # No diagnostic query, credential lookup, owner start, or second send on failure.
         from gateway.session_hosted_transport import owner_request
