@@ -41,7 +41,12 @@ jobs:
       - name: Run the upstream static checks
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: '"$HERMES_PYTHON" scripts/check --base "$BASE_SHA"'
+        # The diff-based guards judge the change against that base, except for files that are
+        # byte-identical to the upstream mirror: those are upstream's code and never a finding.
+        run: |
+          set -euo pipefail
+          judged_base=$(python3 .github/fork-gate-base.py "$BASE_SHA" origin/upstream)
+          "$HERMES_PYTHON" scripts/check --base "$judged_base"
 
   python:
     name: Python runtime (${{ matrix.slice }}/8)

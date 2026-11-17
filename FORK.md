@@ -5,7 +5,7 @@ through pull requests that pass the `Fork gate` workflow
 (`.github/workflows/fork-gate.yml`). `upstream` is a separate branch and is not
 part of this guidance.
 
-## Release sync
+## Upstream baseline
 
 Upstream stable releases enter the trunk as a merge commit on the fixed `ezop` branch. The
 trunk and upstream history are never rebased, squashed or rewritten: the sync branch starts
@@ -105,7 +105,9 @@ python -m pm.build_env --source . --out .venv --group dev --group test \
   --extra matrix --extra messaging
 export HERMES_PYTHON="$PWD/.venv/bin/python"
 
-"$HERMES_PYTHON" scripts/check --base origin/ezop        # the static checks
+# the static checks, as the gate runs them (see "Constraint on the gate")
+"$HERMES_PYTHON" scripts/check \
+  --base "$(python3 .github/fork-gate-base.py origin/ezop origin/upstream)"
 
 # One slice of the Python runtime job (N is 1..8); the gate runs all eight.
 HERMES_TEST_SLICE=N/8 HERMES_TEST_WORKERS=2 HERMES_TEST_FILE_TIMEOUT=900 \
@@ -132,8 +134,156 @@ The gate is a staged bootstrap, not full qualification.
 - Provisional: the suite is inherited from upstream and has not been reviewed for this
   fork. Any test excluded from the gate is named, with its reason, next to the exclusion
   in the workflow file.
-- Release syncs: the gate's static job compares against the pull request's base, the
-  previous trunk, so a sync that brings in many upstream commits reports findings that
-  already exist in the release. The sync itself must pass
-  `scripts/check --base <release commit>`; the findings against the old trunk are listed
-  in the sync pull request, each shown to sit in a file that is identical to the release.
+
+## Release sync
+
+How an upstream stable release is brought into `ezop`. This is a manual procedure for the
+operator, or for a delegate the operator names. It is not an automated or agent-driven
+delivery mode; agents only prepare its inputs (the candidate branch, carry dispositions and
+tests). `ezop` keeps its history: nothing is rebased or force-pushed, and each release lands
+as one merge commit.
+
+### Branches
+
+- `upstream` is the raw mirror of upstream and the review base. Only the operator moves it,
+  and only to the exact commit of the release tag.
+- `ezop` is the fork trunk, where the change lands.
+- Nobody pushes upstream tags or any other upstream ref to the fork.
+
+Before moving `upstream`, read the workflows in the release tree and decide which of them
+could run on the fork: their triggers, the secrets they use and the permissions they ask for.
+Pushing the branch is what lets them run.
+
+### Procedure
+
+Set the release first. `source` below is a remote that points at the upstream repository, not
+at the fork. Fetching the tag into a local ref does not publish it.
+
+```bash
+TAG=<release tag>
+git fetch --no-tags source "refs/tags/$TAG:refs/tags/$TAG"
+TAG_COMMIT=$(git rev-parse "$TAG^{commit}")
+```
+
+1. **Move the mirror** (operator only), after the workflow check above. This must be a
+   fast-forward; if `origin` rejects it, stop and sort that out before going on.
+
+   ```bash
+   git push origin "$TAG_COMMIT:refs/heads/upstream"
+   ```
+
+2. **Make the candidate.** Branch from `ezop` and merge the tag commit with a merge commit.
+   Resolve conflicts in that merge. Carry adaptations (retiring or adapting entries under
+   [Carried behaviours](#carried-behaviours), and removing every upstream workflow file so
+   only `fork-*` files remain) go in further commits on top. The candidate is never rebased
+   or force-pushed; if `ezop` moves, merge `origin/ezop` into it.
+
+   ```bash
+   git fetch origin
+   git switch -c "sync/$TAG" origin/ezop
+   git merge --no-ff "$TAG_COMMIT" -m "merge: upstream $TAG"
+   ```
+
+3. **Check before every push of the candidate.** The chain stops at the first failing
+   check and prints `checks passed` only if all three succeed; anything else means do not push.
+
+   ```bash
+   git fetch origin &&
+   # the mirror is exactly the release tag commit
+   test "$(git rev-parse origin/upstream)" = "$TAG_COMMIT" &&
+   # the candidate contains the current ezop head
+   git merge-base --is-ancestor origin/ezop HEAD &&
+   # .github/workflows holds only fork-* files, and at least one
+   files=$(git ls-tree -r --name-only HEAD .github/workflows) &&
+   test -n "$files" &&
+   ! printf '%s\n' "$files" | grep -qvE '^\.github/workflows/fork-[^/]+\.ya?ml$' &&
+   echo "checks passed"
+   ```
+
+4. **Review.** Open the pull request against `upstream`, not `ezop`:
+
+   ```bash
+   git push origin "sync/$TAG"
+   gh pr create --base upstream --head "sync/$TAG" --title "merge: upstream $TAG"
+   ```
+
+   Never arm auto-merge while the base is `upstream`: it would merge into the mirror. Wait
+   for a green `gate` and a green `xreview` on the head. The review covers only
+   `git diff origin/upstream...<head>`, the fork's delta; it does not re-review upstream.
+
+5. **Land.** Re-run the checks in step 3 (fetch first). Then retarget and merge with a merge
+   commit, not rebase or squash:
+
+   ```bash
+   gh pr edit <PR> --base ezop
+   gh pr merge <PR> --merge
+   ```
+
+   The merge relies on the `gate` and `xreview` already green on the reviewed head; a fresh
+   gate run is not needed as evidence of that tree. Retargeting does start a new `gate` run
+   (the `edited` trigger), and its two diff-based guards now judge the change against `ezop`,
+   skipping files identical to `upstream` (see
+   [Constraint on the gate](#constraint-on-the-gate)). If that run is red, do not merge: the
+   finding is in a file the fork owns. The gate is never loosened to get a landing through;
+   fix it with a commit on the candidate.
+
+   For any new review round after retargeting, whatever the reason (a red `edited` run,
+   `ezop` having moved, a review finding), switch the base back first
+   (`gh pr edit <PR> --base upstream`) and only then push. A pull request that has already
+   merged cannot be retargeted: if the gate on `ezop` turns out red after the merge, merge
+   `origin/ezop` into the candidate, fix it there, and open a new pull request against
+   `upstream` (step 4).
+
+6. **After the merge.** Compare the landed tree with the reviewed one and check the trunk
+   gate:
+
+   ```bash
+   git fetch origin &&
+   MERGE=$(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid) &&
+   if [ "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "<reviewed head>^{tree}")" ]
+   then echo "tree: match"; else echo "tree: MISMATCH"; false; fi &&
+   gh api "repos/<owner>/<repo>/commits/$MERGE/check-runs" \
+     --jq '.check_runs[] | select(.name=="gate") | .conclusion'
+   ```
+
+   `tree: MISMATCH` stops the sequence. It means `ezop` moved and the landed tree is not the
+   one that was reviewed: look at what changed before anything else. Otherwise the gate on
+   `ezop` must print `success`. Record the
+   tag, the tag commit, the reviewed head, the merge commit, the tree comparison and the
+   gate result, on the pull request or wherever the operator keeps sync records.
+
+### Constraint on the gate
+
+Step 5 relies on the gate result for the reviewed head, so no job or step in
+`fork-gate.yml` may behave differently by base branch or event type. The result then depends
+on the tree, with one deliberate exception: the two diff-based guards in the static checks
+(the code-health ratchet and the blob-size check) take the pull request base, or the
+previous head on a push, as the base they compare against. This keeps the fork's own
+baseline enforced on ordinary pull requests. The `alarm` job is not an exception: it runs
+only on push, after `gate` has finished, and cannot change `gate`'s result.
+
+Those guards judge only what the fork owns. A file whose mode and content at the head equal
+the same path in `origin/upstream` is upstream's code, so its findings never count. The step
+treats every run the same way: `.github/fork-gate-base.py` builds a local commit that is the
+real base except that each such file already holds its head content, so the file shows no
+diff, and `scripts/check` gets that commit as `--base`. Every other file is still judged
+against the real base, so growing a file the fork modified fails as before. The script reads
+`origin/upstream` and stops the step if that ref is missing. Because those files come from
+the head, the `ENFORCEMENT` switch and the known-environment-variable set are read from the
+head's copy wherever the fork's file equals upstream's.
+
+For a release sync that means:
+
+- On the sync pull request (base `upstream`) they judge the fork's delta against `upstream`.
+- After retargeting to `ezop` (the `edited` run) and after the merge (the push run) they
+  judge the fork's delta against `ezop`. Files identical to `upstream` are skipped, so only
+  fork-owned files can turn the run red.
+- A red gate at either point blocks the landing or flags it, like any other red gate. Fix it
+  with a commit on the candidate and review again with the base `upstream` (step 4); never
+  loosen the gate.
+
+### Not covered
+
+- How GitHub counts an earlier check run on a head after its pull request base changes.
+- A race where `ezop` moves after the last check in step 5. The tree comparison in step 6
+  detects it; nothing prevents it.
