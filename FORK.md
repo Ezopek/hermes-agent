@@ -74,11 +74,8 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   relocation of the outbound send code.
 - **Generic `pre_stop` plugin hook.** Plugins can check every text stop before the final answer
   is accepted and either send the agent back to work or end the turn as `Unresolved`; a
-  callback that raises or times out counts as `Unresolved`. While a `pre_stop` hook is registered
-  the turn's text is held like a `hold_stream` transform (no stream deltas, TTS or interim
-  messages), so a rejected draft never reaches the user: only the accepted answer or the notice
-  is published. Files: `agent/turn_stop_gates.py`, `agent/conversation_loop.py`,
-  `agent/turn_final_response.py`, `agent/turn_finalizer.py`, `hermes_cli/plugins_dispatch.py`. Retire when upstream ships an
+  callback that raises or times out counts as `Unresolved`. Files: `agent/turn_stop_gates.py`, `agent/turn_final_response.py`,
+  `agent/turn_finalizer.py`, `hermes_cli/plugins_dispatch.py`. Retire when upstream ships an
   equivalent hook that runs on every text stop and does not fail open. Disposition: keep;
   upstream's `pre_verify` fires only after code edits.
 - **Context preserved when the compression summary is skipped or fails.**
