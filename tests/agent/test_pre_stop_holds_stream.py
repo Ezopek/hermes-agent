@@ -159,3 +159,75 @@ def test_a_hold_stream_transform_still_sees_all_text_first_so_clarify_prose_stay
     with FakeLLMServer(script) as srv:
         _result, events = _clarify_run(srv.base_url, "interim")
     assert PROSE not in "".join(text for kind, text in events if kind != "CLARIFY"), events
+
+
+@pytest.mark.parametrize("hooked", [False, True], ids=["control_no_hook", "pre_stop_hook"])
+@pytest.mark.parametrize("progress_callback", [False, True], ids=["no_progress_callback", "classic_cli_wiring"])
+def test_the_prose_before_a_clarify_call_prints_in_a_cli_without_streaming(monkeypatch, hooked, progress_callback):
+    """The classic CLI with streaming and voice off has no delta, interim or clarify-context callback.
+    ``classic_cli_wiring`` is what ``cli_agent_setup_mixin`` builds (quiet, ``platform="cli"``, a tool-progress callback,
+    status lines through ``_print_fn``): without a hook it prints no tool-call prose, so the control expects none.
+    The ``no_progress_callback`` embedder prints it as a ``💬`` line. Under a ``pre_stop`` hold the prose is released
+    to both, once, before the prompt."""
+    _register(monkeypatch, (lambda **_kw: None) if hooked else None)
+    script = [ToolCall("clarify", {"questions": [{"question": "Which one?", "choices": ["A", "B"]}]}, text=PROSE),
+              Text(ANSWER, chunk_chars=5)]
+    printed: list = []
+    with FakeLLMServer(script) as srv:
+        agent = AIAgent(base_url=srv.base_url, api_key="sk-fake-e2e", provider="custom", model="fake-model",
+                        quiet_mode=True, skip_context_files=True, skip_memory=True, enabled_toolsets=["clarify"],
+                        platform="cli", tool_progress_callback=(lambda *_a, **_kw: None) if progress_callback else None)
+        agent._print_fn = lambda *args, **_kw: printed.append(" ".join(map(str, args)))
+        agent.clarify_callback = lambda questions: printed.append("CLARIFY") or {"answers": {"q0": "A"}, "outcome": "answered"}
+        result = agent.run_conversation("which one?")
+    assert result["final_response"] == ANSWER
+    prose_lines = [i for i, line in enumerate(printed) if PROSE in line]
+    assert len(prose_lines) == (0 if progress_callback and not hooked else 1), printed
+    if prose_lines:
+        assert prose_lines[0] < printed.index("CLARIFY")
+
+
+def _observed_turn(monkeypatch, verdicts, script):
+    """Run one turn with ``pre_stop`` returning ``verdicts`` in order; returns the result, the text deltas and the end events."""
+    from agent.plugin_stream_hooks import shutdown_plugin_stream_hook_dispatcher
+
+    deltas: list = []
+    ends: list = []
+    verdicts = iter(verdicts)
+    _register(monkeypatch, lambda **_kw: next(verdicts), on_stream_delta=lambda **kw: deltas.append(kw),
+              on_stream_end=lambda **kw: ends.append(kw))
+    with FakeLLMServer(script) as srv:
+        result, _shown = _run(srv.base_url)
+    shutdown_plugin_stream_hook_dispatcher()
+    return result, [kw for kw in deltas if kw["kind"] == "text"], ends
+
+
+def test_stream_observers_get_the_accepted_answer_once_and_never_the_draft(monkeypatch):
+    result, deltas, ends = _observed_turn(
+        monkeypatch, [{"action": "continue", "message": "check it again"}, None],
+        [Text(DRAFT, chunk_chars=5), Text(ANSWER, chunk_chars=5)])
+    assert result["final_response"] == ANSWER
+    assert "".join(kw["delta"] for kw in deltas) == ANSWER
+    assert [kw["final_text"] for kw in ends if kw["final_text"]] == [ANSWER]
+    assert not any(DRAFT[:5] in str(kw) for kw in deltas + ends)
+
+
+def test_stream_observers_get_the_unresolved_notice_and_never_the_draft(monkeypatch):
+    result, deltas, ends = _observed_turn(
+        monkeypatch, [{"action": "unresolved", "message": "not confirmed"}], [Text(DRAFT, chunk_chars=5)])
+    notice = result["final_response"]
+    assert notice.startswith("Unresolved") and DRAFT not in notice
+    assert "".join(kw["delta"] for kw in deltas) == notice
+    assert [kw["final_text"] for kw in ends if kw["final_text"]] == [notice]
+    assert not any(DRAFT[:5] in str(kw) for kw in deltas + ends)
+
+
+def test_the_observer_end_event_still_carries_the_streamed_text_without_a_pre_stop_hook(monkeypatch):
+    from agent.plugin_stream_hooks import shutdown_plugin_stream_hook_dispatcher
+
+    ends: list = []
+    _register(monkeypatch, on_stream_end=lambda **kw: ends.append(kw))
+    with FakeLLMServer([Text(ANSWER, chunk_chars=5)]) as srv:
+        _run(srv.base_url)
+    shutdown_plugin_stream_hook_dispatcher()
+    assert [kw["final_text"] for kw in ends] == [ANSWER]

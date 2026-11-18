@@ -50,6 +50,16 @@ def publish_held_final_row(agent: Any, final_msg: dict[str, Any], final_response
         final_msg["content"] = final_response
 
 
+def publish_held_final_to_observers(agent: Any, result: Any) -> None:
+    """A held turn's observers got no text of any draft; hand them the answer the user got (the rewrite, or the
+    ``Unresolved`` notice) as one text delta and an end, once the verdict and the transforms have settled it."""
+    text = result.get("final_response") if isinstance(result, dict) else None
+    if getattr(agent, "_hold_stream", False) is not True or not isinstance(text, str) or not text or result.get("failed"):
+        return
+    agent._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
+    agent._enqueue_stream_hook("on_stream_end", final_text=text, finished=True, error=None)
+
+
 def _codex_commentary_texts(agent, assistant_msg: dict[str, Any]) -> list[str]:
     """Raw text of each non-empty ``phase=commentary`` item, before think stripping and fencing."""
     items = assistant_msg.get("codex_message_items") if getattr(agent, "show_commentary", True) else None
@@ -223,9 +233,12 @@ class StreamDeliveryMixin:
         return asks_clarify and not getattr(self, "_held_transforms", None)
 
     def _stream_released_prose(self, text: str, *, already_streamed: bool = False) -> None:
-        """Send released prose through the display + TTS delta callbacks, past the hold."""
+        """Send released prose through the display + TTS delta callbacks, past the hold. A front end with no
+        delta callback (the classic CLI with streaming and voice off) gets the line a non-held turn prints."""
         if [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)].count(True):
             self._record_streamed_assistant_text(text)
+        else:
+            self._vprint(f"  ┊ 💬 {text}", force=True)
 
     def _deliver_interim(self, visible: str, *, already_streamed: bool, record: list[str],
                          asks_clarify: bool = False) -> None:
