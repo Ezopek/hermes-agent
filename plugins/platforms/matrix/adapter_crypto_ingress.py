@@ -7,12 +7,13 @@ No room-key requests are sent to untrusted or third-party devices.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 import logging
 import time
 
 logger = logging.getLogger(__name__)
 _MAX_PENDING = 64
+_MAX_OVERFLOW = 256  # parked events past _MAX_PENDING; beyond it handle() holds the sync
 _TTL_SECONDS = 30.0
 _MAX_SEEN = 1000
 _SEEN_TTL_SECONDS = 300.0
@@ -27,6 +28,8 @@ class CryptoIngress:
         self.crypto_tasks = Counter()
         self.seen = OrderedDict()
         self.failures = Counter()
+        self.overflow = deque()  # events parked while every slot is busy
+        self.deferred = 0  # events that had to be parked; not a failure, nothing is dropped
         self.closed = False
 
     def track_crypto(self, operation, *, ignore_closed=False):
@@ -80,16 +83,36 @@ class CryptoIngress:
             return
         if not self._remember(key):
             return
-        if len(self.pending) >= _MAX_PENDING:
-            self._failure(event, "capacity")
-            return
         ciphertext = getattr(event.content, "ciphertext", None)
         if not event.event_id or not isinstance(ciphertext, str) or len(ciphertext) > 128 * 1024:
             self._failure(event, "invalid_event")
             return
-        task = asyncio.create_task(self._process(event, event.source))
-        self.pending[key] = task
-        task.add_done_callback(lambda done: self.pending.pop(key, None))
+        # The SDK runs every handler of one sync at once and stores the cursor first, so a
+        # refused event is gone for good. Past the slots, park it (keys for the busy slots may
+        # arrive in the next sync, so the sync must keep running); only a full overflow holds
+        # this wait_sync handler, and with it the next /sync, until a slot frees.
+        if len(self.pending) >= _MAX_PENDING:
+            self.deferred += 1
+            logger.warning("Matrix: encrypted event %s in %s deferred (%d pending, %d parked)",
+                           event.event_id, event.room_id, len(self.pending), len(self.overflow))
+            while len(self.overflow) >= _MAX_OVERFLOW and not self.closed:
+                await asyncio.wait(set(self.pending.values()), return_when=asyncio.FIRST_COMPLETED)
+            if self.closed:
+                self._failure(event, "disconnected")
+                return
+            self.overflow.append(event)
+            return
+        self._start(event)
+
+    def _start(self, event):
+        key = (event.room_id, event.event_id)
+        self.pending[key] = asyncio.create_task(self._process(event, event.source))
+        self.pending[key].add_done_callback(lambda done: self._finished(key))
+
+    def _finished(self, key):
+        self.pending.pop(key, None)
+        while self.overflow and len(self.pending) < _MAX_PENDING and not self.closed:
+            self._start(self.overflow.popleft())
 
     async def _wait_for_key(self, event):
         # SDK 0.21 wait_for_session retains timed-out futures indefinitely. A bounded
@@ -151,12 +174,16 @@ class CryptoIngress:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for event in self.overflow:
+            self._failure(event, "disconnected")
+        self.overflow.clear()
         self.pending.clear()
         self.crypto_tasks.clear()
         self.seen.clear()
 
     def diagnostics(self):
-        return {"pending": len(self.pending), "crypto_tasks": len(self.crypto_tasks), "terminal_failures": dict(self.failures)}
+        return {"pending": len(self.pending), "crypto_tasks": len(self.crypto_tasks), "terminal_failures": dict(self.failures),
+                "parked": len(self.overflow), "deferred": self.deferred}
 
 
 def install_crypto_ingress(adapter, client):

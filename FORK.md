@@ -62,7 +62,10 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   (or an equivalent). Disposition: adapt.
 - **Matrix crypto ownership and one-time-key durability.** One owner serialises access to the
   Matrix crypto store, including standalone sends routed through the gateway; events whose keys
-  arrive late are recovered; one-time keys are persisted before they are published, and a batch
+  arrive late are recovered; events past the 64-event intake bound are parked (up to 256) and
+  started as slots free, so the sync keeps delivering keys and nothing is dropped (only a full
+  overflow holds the sync; a disconnect reports parked events as lost, like in-flight ones);
+  one-time keys are persisted before they are published, and a batch
   whose upload outcome is unknown is retired (private keys kept, IDs never published again) so
   a peer's claimed key is not handed to a second peer. Standalone
   sends do not use upstream's direct REST sender; they take the same shared-bot target rule as

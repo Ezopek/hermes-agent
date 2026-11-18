@@ -146,7 +146,7 @@ async def test_later_index_key_is_terminal_not_false_recovery(native_owner, capl
 
 
 @pytest.mark.asyncio
-async def test_expiry_capacity_duplicates_and_disconnect_are_bounded(native_owner, monkeypatch, caplog):
+async def test_expiry_backpressure_duplicates_and_disconnect_are_bounded(native_owner, monkeypatch, caplog):
     import plugins.platforms.matrix.adapter_crypto_ingress as ingress_module
     monkeypatch.setattr(ingress_module, "_TTL_SECONDS", 0.05)
     monkeypatch.setattr(ingress_module, "_MAX_PENDING", 2)
@@ -159,8 +159,10 @@ async def test_expiry_capacity_duplicates_and_disconnect_are_bounded(native_owne
     await adapter._absorb_sync(adapter._client, data)
     assert len(ingress.pending) <= 2
     await async_wait_until(lambda: not ingress.pending, timeout=3, what="missing sessions expired")
-    assert ingress.failures["capacity"] == 1
-    assert ingress.failures["missing_session_expired"] == 2
+    # The third event was parked rather than dropped, then expired like the others.
+    assert "capacity" not in ingress.failures
+    assert ingress.failures["missing_session_expired"] == 3
+    assert ingress.diagnostics()["deferred"] == 1
     assert not admitted
     assert any("$missing0" in record.message for record in caplog.records)
     monkeypatch.setattr(ingress_module, "_TTL_SECONDS", 30)
