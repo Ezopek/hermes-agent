@@ -1833,6 +1833,7 @@ def run_conversation(
     ``{turn_id, current_turn_user_idx}`` pair is stamped beside the exact ``messages`` it
     addresses, after every history rewrite including post-turn micro-compaction.
     """
+    from agent.stream_delivery import publish_held_final_to_observers
     from agent.turn_context import export_current_turn_boundary
     from agent.turn_finalizer import fence_result_reply, settle_held_final
     from agent.voice_turn_route import end_voice_turn_route
@@ -1868,6 +1869,7 @@ def run_conversation(
     from agent.primary_auth_fallback import lead_failed_turn_with_primary_auth
     lead_failed_turn_with_primary_auth(agent, result)
     settle_held_final(agent, result)
+    publish_held_final_to_observers(agent, result)
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
