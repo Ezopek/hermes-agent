@@ -95,6 +95,13 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   plain `ValueError`. The product code is unaffected (the password is redacted either way), so
   the test hides `aiohttp_socks` and keeps both assertions. Retire when upstream's test no
   longer depends on that package being absent.
+- **Compress-restart FIFO journey test does not assume which turn compacts.** The turn that
+  trips the preflight compaction threshold depends on the system prompt's size, so on some
+  hosted runners it is one turn earlier and the test's `PRESSURE_1` expectation failed. The
+  test now checks that each follower request starts with the committed compacted
+  transcript. File: `tests/gateway/test_journey_compress_restart_fifo.py`. Retire when
+  upstream's version of the test no longer depends on the compaction turn. Disposition: keep;
+  the `v0.23.2` test still assumes the turn.
 
 ## Running the gate locally
 
