@@ -771,6 +771,10 @@ def finalize_turn(
             _raw = final_response
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
             _store_rewrite_on_tail(agent, messages, _raw, final_response)
+            if _pending_verification_response:
+                # The budget notice replaced a draft an earlier gate sent back: the stored tail is that
+                # draft (the nudge rows are gone now), so it takes the notice and keeps the draft for the model.
+                _store_rewrite_on_tail(agent, messages, _pending_verification_response, final_response)
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
         if not interrupted and not failed and not vetoed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
