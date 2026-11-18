@@ -186,6 +186,11 @@ def test_budget_exhaustion_after_an_earlier_gate_never_publishes_a_draft_pre_sto
     assert result["final_response"].startswith("Unresolved")
     assert "unjudged draft" not in result["final_response"]
     assert result["completed"] is False
+    # the stored transcript shows the notice too (a resumed TUI/desktop session); the model keeps its draft
+    last = result["messages"][-1]
+    assert last["role"] == "assistant" and last["content"] == result["final_response"]
+    assert last.get("display_kind") != "hidden"
+    assert last.get("api_content") == "unjudged draft"
 
 
 def test_budget_exhaustion_without_a_draft_publishes_the_notice_not_a_summary(agent, monkeypatch):
