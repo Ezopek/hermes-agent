@@ -595,8 +595,8 @@ class CLIChatTurnMixin:
                     ),
                     platform="cli", user_config=getattr(self.agent, "_notification_config", None))
 
-        # Batch TTS unless streaming TTS already spoke the response; a held turn streamed nothing to it.
-        if self._voice_tts and response and (not turn.use_streaming_tts or getattr(self.agent, "_hold_stream", False)):
+        # Batch TTS unless streaming TTS already spoke the response.
+        if self._voice_tts and response and not turn.use_streaming_tts:
             self._voice_speak_response_async(response)
 
         # Re-queue the interrupt message (plus any that arrived meanwhile) as the next
