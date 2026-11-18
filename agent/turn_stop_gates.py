@@ -103,6 +103,28 @@ def pre_stop_unresolved_notice(agent) -> Optional[str]:
     return None
 
 
+def _pre_stop_registered() -> bool:
+    from hermes_cli.lifecycle import has_hook
+
+    if has_hook("pre_stop"):
+        return True
+    # the safe-worker policy hides a registered check from has_hook: do not read that as "none"
+    from hermes_cli.plugins_dispatch import pre_stop_suppressed_by_policy
+
+    return pre_stop_suppressed_by_policy()
+
+
+def pre_stop_holds_stream() -> bool:
+    """True when this turn's text must wait for the ``pre_stop`` verdict, which runs only after the model
+    finished: a rejected draft must not reach the display, TTS or interim callbacks first. Fails closed when
+    the registry cannot be read (the verdict is ``unresolved`` then too)."""
+    try:
+        return _pre_stop_registered()
+    except Exception:
+        logger.warning("pre_stop registration check failed", exc_info=True)
+        return True
+
+
 def _pre_stop_verdict(agent, final_response) -> tuple[str, str]:
     """``("pass" | "continue" | "unresolved", message)`` from the generic ``pre_stop`` hook. Unlike
     ``pre_verify`` it needs no edits and does not fail open: a hook that raised or timed out, or a
@@ -111,13 +133,7 @@ def _pre_stop_verdict(agent, final_response) -> tuple[str, str]:
     if getattr(agent, "_interrupt_requested", False) is True:
         return "pass", ""
     try:
-        from hermes_cli.lifecycle import has_hook
-
-        registered = has_hook("pre_stop")
-        if not registered:  # the safe-worker policy hides a registered check from has_hook: do not read that as "none"
-            from hermes_cli.plugins_dispatch import pre_stop_suppressed_by_policy
-
-            registered = pre_stop_suppressed_by_policy()
+        registered = _pre_stop_registered()
     except Exception as exc:
         logger.warning("pre_stop registration check failed (%s)", type(exc).__name__, exc_info=True)
         return "unresolved", "the pre_stop registry could not be read, so the answer was not confirmed"
