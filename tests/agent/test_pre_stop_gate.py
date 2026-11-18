@@ -151,6 +151,73 @@ def test_iteration_budget_exhaustion_does_not_promote_the_rejected_candidate(age
     assert result["completed"] is False
 
 
+def _tool_call_response():
+    call = SimpleNamespace(id="call_1", type="function", function=SimpleNamespace(name="no_such_tool", arguments="{}"))
+    message = SimpleNamespace(content=None, tool_calls=[call])
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="tool_calls")], model="test/model", usage=None,
+    )
+
+
+def _edited_turn_sent_back_by_pre_verify(agent, monkeypatch, **extra_hooks):
+    """One-iteration budget; the only draft is sent back by ``pre_verify``, before ``pre_stop`` can see it."""
+    agent.max_iterations = 1
+    agent.iteration_budget.max_total = 1
+    _register(monkeypatch, pre_verify=[lambda **_kw: {"action": "continue", "message": "run the tests"}],
+              **extra_hooks)
+    _script(agent, "unjudged draft")
+    real_call = agent._interruptible_api_call
+
+    def edited(api_kwargs):
+        agent._turn_file_mutation_paths = {"changed.py"}
+        return real_call(api_kwargs)
+
+    agent._interruptible_api_call = edited
+
+
+def test_budget_exhaustion_after_an_earlier_gate_never_publishes_a_draft_pre_stop_did_not_judge(agent, monkeypatch):
+    seen = []
+    _edited_turn_sent_back_by_pre_verify(agent, monkeypatch, pre_stop=[lambda **kw: seen.append(kw)])
+
+    result = agent.run_conversation("edit the file")
+
+    assert seen == []  # pre_stop never saw the draft
+    assert result["turn_exit_reason"] == "max_iterations_reached(1/1)"
+    assert result["final_response"].startswith("Unresolved")
+    assert "unjudged draft" not in result["final_response"]
+    assert result["completed"] is False
+
+
+def test_budget_exhaustion_without_a_draft_publishes_the_notice_not_a_summary(agent, monkeypatch):
+    agent.max_iterations = 1
+    agent.iteration_budget.max_total = 1
+    _register(monkeypatch, pre_stop=[lambda **_kw: None])
+    agent._interruptible_api_call = lambda _kw: _tool_call_response()
+
+    result = agent.run_conversation("summarise the topic")
+
+    agent._handle_max_iterations.assert_not_called()
+    assert result["final_response"].startswith("Unresolved")
+    assert "replacement summary" not in result["final_response"]
+    assert result["completed"] is False
+
+
+def test_budget_fallback_without_a_pre_stop_hook_is_unchanged(agent, monkeypatch):
+    _edited_turn_sent_back_by_pre_verify(agent, monkeypatch)
+
+    result = agent.run_conversation("edit the file")
+
+    assert result["final_response"] == "unjudged draft"  # the preserved verification fallback, as before
+    agent._handle_max_iterations.assert_not_called()
+
+    agent.max_iterations = 1
+    agent.iteration_budget.max_total = 1
+    agent._interruptible_api_call = lambda _kw: _tool_call_response()
+    result = agent.run_conversation("summarise the topic")
+
+    assert result["final_response"].startswith("replacement summary")
+
+
 def test_a_later_pass_clears_the_earlier_rejection(agent, monkeypatch):
     verdicts = iter([{"action": "continue", "message": "not yet"}, None])
     _register(monkeypatch, pre_stop=[lambda **_kw: next(verdicts)])
