@@ -78,14 +78,15 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   the turn's text is held like a `hold_stream` transform (no stream deltas, TTS or interim
   messages, and no draft text for `on_stream_delta` / `on_stream_end` / `on_interim_message`
   observers), so a rejected draft never reaches the user: only the accepted answer or the notice
-  is published. Observers get that answer, once the verdict and transforms settled it, as one
-  text delta and an `on_stream_end` carrying it; CLI voice mode speaks it whole, and the gateway
-  still sends its whole-file voice reply for it. The prose beside a `clarify` call is the
-  exception (that message is a tool call, never a text stop): it reaches the user with the
-  prompt, as an interim message, a clarify-context message, a delta, or (no delta callback, the
-  classic CLI with streaming off) a `💬` status line. A `hold_stream` transform keeps holding
-  it. Files: `agent/turn_stop_gates.py`, `agent/conversation_loop.py`,
-  `agent/stream_delivery.py`, `hermes_cli/cli_chat_turn_mixin.py`, `gateway/run_turn.py`,
+  is published. Observers get no end event of a draft; once the verdict and transforms settled
+  the answer they get it as one text delta and the one `on_stream_end` carrying it. CLI voice
+  mode and the TUI speak it whole, and the gateway still sends its whole-file voice reply for it.
+  The prose beside a `clarify` call is the exception (that message is a tool call, never a text
+  stop): it reaches the user with the prompt, as an interim message, a clarify-context message, a
+  delta, or (no delta callback, the classic CLI with streaming off) a `💬` status line, and its
+  row is stored visible. A `hold_stream` transform keeps holding it. Files:
+  `agent/turn_stop_gates.py`, `agent/conversation_loop.py`, `agent/stream_delivery.py`,
+  `hermes_cli/cli_chat_turn_mixin.py`, `gateway/run_turn.py`, `tui_gateway/prompt_turn.py`,
   `agent/turn_final_response.py`, `agent/turn_finalizer.py`, `hermes_cli/plugins_dispatch.py`.
   Retire when upstream ships an
   equivalent hook that runs on every text stop and does not fail open. Disposition: keep;

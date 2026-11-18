@@ -29,10 +29,17 @@ def withhold_held_row(agent: Any, assistant_msg: dict[str, Any]) -> dict[str, An
     delivery shows, and a row whose commentary fences to nothing can still hold a partial answer."""
     if getattr(agent, "_hold_stream", False) is not True or assistant_msg.get("display_kind"):
         return assistant_msg
+    if _asks_clarify(assistant_msg) and agent._releases_clarify_prose(True):
+        return assistant_msg  # released to the user with the prompt, so a history load shows it too
     texts = [*_codex_commentary_texts(agent, assistant_msg), flatten_message_text(assistant_msg.get("content"))]
     if any(agent._strip_think_blocks(text).strip() for text in texts):
         assistant_msg["display_kind"] = "hidden"
     return assistant_msg
+
+
+def _asks_clarify(assistant_msg: dict[str, Any]) -> bool:
+    return any(isinstance(tc, dict) and (tc.get("function") or {}).get("name") == "clarify"
+               for tc in assistant_msg.get("tool_calls") or ())
 
 
 def publish_held_final_row(agent: Any, final_msg: dict[str, Any], final_response: Any, joined: bool) -> None:
@@ -51,13 +58,18 @@ def publish_held_final_row(agent: Any, final_msg: dict[str, Any], final_response
 
 
 def publish_held_final_to_observers(agent: Any, result: Any) -> None:
-    """A held turn's observers got no text of any draft; hand them the answer the user got (the rewrite, or the
-    ``Unresolved`` notice) as one text delta and an end, once the verdict and the transforms have settled it."""
-    text = result.get("final_response") if isinstance(result, dict) else None
-    if getattr(agent, "_hold_stream", False) is not True or not isinstance(text, str) or not text or result.get("failed"):
+    """A held turn's observers got no text and no end of any draft (``_emit_stream_end``); hand them the answer the
+    user got (the rewrite, or the ``Unresolved`` notice) as one text delta and the one end, once the verdict and the
+    transforms have settled it. A failed turn ends without text."""
+    if getattr(agent, "_hold_stream", False) is not True or not isinstance(result, dict):
         return
-    agent._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
-    agent._enqueue_stream_hook("on_stream_end", final_text=text, finished=True, error=None)
+    failed = bool(result.get("failed"))
+    text = result.get("final_response")
+    text = text if isinstance(text, str) and not failed else ""
+    if text:
+        agent._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
+    agent._enqueue_stream_hook("on_stream_end", final_text=text, finished=not failed,
+                               error=(str(result.get("error") or "") or None) if failed else None)
 
 
 def _codex_commentary_texts(agent, assistant_msg: dict[str, Any]) -> list[str]:
@@ -287,8 +299,7 @@ class StreamDeliveryMixin:
             if key and key not in pending and not self._interim_text_was_delivered(part):
                 pending[key] = part
         undelivered_parts = list(pending.values())
-        asks_clarify = any(isinstance(tc, dict) and (tc.get("function") or {}).get("name") == "clarify"
-                           for tc in assistant_msg.get("tool_calls") or ())
+        asks_clarify = _asks_clarify(assistant_msg)
         # With interim off, the text beside a clarify call is decision context, not Codex progress.
         # Prefer the draft in content over an unrelated phase=commentary item.
         clarify_fallback = (asks_clarify and getattr(self, "interim_assistant_callback", None) is None
@@ -385,8 +396,9 @@ class StreamDeliveryMixin:
         self._enqueue_stream_hook("on_stream_start")
 
     def _emit_stream_end(self, *, final_text: str, finished: bool, error: str | None) -> None:
-        held = getattr(self, "_hold_stream", False)  # the draft may still be rejected: observers get no text of it
-        self._enqueue_stream_hook("on_stream_end", final_text="" if held else final_text, finished=finished, error=error)
+        if getattr(self, "_hold_stream", False) and error is None:
+            return  # the draft may still be rejected: observers get its end with the settled answer, once
+        self._enqueue_stream_hook("on_stream_end", final_text=final_text, finished=finished, error=error)
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
