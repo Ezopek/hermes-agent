@@ -137,11 +137,12 @@ def _resolve_budget_fallback(
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-        from agent.turn_stop_gates import pre_stop_unresolved_notice
-        _rejected_notice = pre_stop_unresolved_notice(agent)
+        from agent.turn_stop_gates import pre_stop_budget_notice
+        _rejected_notice = pre_stop_budget_notice(agent)
         if _rejected_notice:
-            # ``pre_stop`` rejected the withheld candidate and the budget ran out before it passed:
-            # publish the unresolved state, never the rejected candidate as if it were accepted.
+            # With a ``pre_stop`` hook the budget ran out before it accepted a draft (rejected, or sent
+            # back by an earlier gate before it saw it): publish the unresolved state, never that
+            # draft or a summary as if it were accepted.
             final_response = _rejected_notice
         elif _pending_verification_response:
             # A verification gate withheld a composed answer, then the budget ran out:

@@ -81,7 +81,9 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   the turn's text is held like a `hold_stream` transform (no stream deltas, TTS or interim
   messages, and no draft text for `on_stream_delta` / `on_stream_end` / `on_interim_message`
   observers), so a rejected draft never reaches the user: only the accepted answer or the notice
-  is published. Observers get no end event of a draft; once the verdict and transforms settled
+  is published. That includes budget exhaustion: with a hook registered, a turn that runs out of
+  iterations before `pre_stop` accepted a draft (rejected, or sent back by an earlier gate
+  before it saw it) ends with the `Unresolved` notice, never a draft or a summary. Observers get no end event of a draft; once the verdict and transforms settled
   the answer they get it as one text delta and the one `on_stream_end` carrying it. CLI voice
   mode and the TUI speak it whole, and the gateway still sends its whole-file voice reply for it.
   The prose beside a `clarify` call is the exception (that message is a tool call, never a text

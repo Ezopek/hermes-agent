@@ -103,6 +103,19 @@ def pre_stop_unresolved_notice(agent) -> Optional[str]:
     return None
 
 
+def pre_stop_budget_notice(agent) -> Optional[str]:
+    """``pre_stop_unresolved_notice`` for a turn whose iteration budget ran out with no accepted answer.
+    With a ``pre_stop`` hook registered, no draft (or summary) is accepted until the hook judged it, and a
+    pass ends the turn with an answer, so reaching the budget fallback means none was: record that state
+    (the turn's notice provenance) when no earlier verdict did. ``None`` without a hook."""
+    if not pre_stop_holds_stream():
+        return None
+    state = _pre_stop_turn_state(agent)
+    if not state["unresolved"]:
+        state["unresolved"] = "the iteration budget ran out before the completion check accepted an answer"
+    return pre_stop_unresolved_notice(agent)
+
+
 def _pre_stop_registered() -> bool:
     from hermes_cli.lifecycle import has_hook
 
