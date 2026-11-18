@@ -109,7 +109,8 @@ The gate (`.github/workflows/fork-gate.yml`) builds the test environment with th
 listed under `extras:` in that file, runs the static checks, then runs the Python suites in
 eight slices. Use an isolated `HERMES_HOME` so nothing touches an existing Hermes install.
 The Matrix extra builds against `libolm-dev`; the file search and doctor store probe tests
-need `ripgrep` (`rg`) on `PATH`.
+need `ripgrep` (`rg`) on `PATH`, and the source-build tests need `node` and `pnpm` on `PATH`
+(the runtime job installs the locked ones with `packages: pnpm` of `setup-pm`).
 
 ```bash
 export HERMES_HOME="$(mktemp -d)"
