@@ -1475,7 +1475,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
     async def _run_agent_finalize_streaming_tts(self, turn_ctx: TurnContext, adapter: Any) -> None:
         """Finalize the streaming-TTS consumer on the outer event-loop thread (covers early returns
         from run_sync). On drain timeout abort to free the task — audible streams keep whole-file
-        suppression, silent streams stay eligible for the whole-file fallback."""
+        suppression, silent streams and held turns (the answer never streamed) stay eligible for it."""
         _stts = turn_ctx.streaming_tts_consumer_holder[0]
         if _stts is None:
             return
@@ -1487,9 +1487,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         if not _stts.done:
             _stts.abort("streaming TTS finalisation timeout")
             await _stts.wait_complete(timeout=2.0)
-        # A pre_stop-held turn streams only the released clarify prose: the final answer is still to be spoken whole.
-        _agent = turn_ctx.agent_holder[0]
-        if _stts.suppress_whole_file and adapter is not None and not getattr(_agent, "_hold_stream", False):
+        if _stts.suppress_whole_file and adapter is not None and not getattr(turn_ctx.agent_holder[0], "_hold_stream", False):
             _mark_turn = getattr(adapter, "_mark_streaming_tts_completed_turn", None)
             if callable(_mark_turn):
                 _mark_turn(turn_ctx.session_key, turn_ctx.run_generation)
