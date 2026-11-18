@@ -1487,7 +1487,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         if not _stts.done:
             _stts.abort("streaming TTS finalisation timeout")
             await _stts.wait_complete(timeout=2.0)
-        if _stts.suppress_whole_file and adapter is not None:
+        # A pre_stop-held turn streams only the released clarify prose: the final answer is still to be spoken whole.
+        _agent = turn_ctx.agent_holder[0]
+        if _stts.suppress_whole_file and adapter is not None and not getattr(_agent, "_hold_stream", False):
             _mark_turn = getattr(adapter, "_mark_streaming_tts_completed_turn", None)
             if callable(_mark_turn):
                 _mark_turn(turn_ctx.session_key, turn_ctx.run_generation)
