@@ -115,3 +115,20 @@ async def test_closing_reports_parked_and_waiting_events_as_disconnected():
 
     assert ingress.pending == {} and not ingress.overflow and client.dispatched == []
     assert ingress.failures["disconnected"] == total
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_waiting_handler_reports_the_event_as_disconnected():
+    client = _Client()
+    ingress = CryptoIngress(_Adapter(), client)
+    handlers = [asyncio.create_task(ingress.handle(_event(n))) for n in range(_MAX_PENDING + _MAX_OVERFLOW + 1)]
+    await _settle()
+    waiting = handlers[-1]
+    assert not waiting.done()
+
+    waiting.cancel()  # shutdown cancels the sync task before it calls ingress.close()
+    await asyncio.gather(waiting, return_exceptions=True)
+
+    assert ingress.failures["disconnected"] == 1
+    await ingress.close()
+    await asyncio.gather(*handlers, return_exceptions=True)

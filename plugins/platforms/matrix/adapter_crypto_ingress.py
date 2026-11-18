@@ -95,8 +95,12 @@ class CryptoIngress:
             self.deferred += 1
             logger.warning("Matrix: encrypted event %s in %s deferred (%d pending, %d parked)",
                            event.event_id, event.room_id, len(self.pending), len(self.overflow))
-            while len(self.overflow) >= _MAX_OVERFLOW and not self.closed:
-                await asyncio.wait(set(self.pending.values()), return_when=asyncio.FIRST_COMPLETED)
+            try:
+                while len(self.overflow) >= _MAX_OVERFLOW and not self.closed:
+                    await asyncio.wait(set(self.pending.values()), return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:  # shutdown cancels the sync task before close()
+                self._failure(event, "disconnected")
+                raise
             if self.closed:
                 self._failure(event, "disconnected")
                 return
