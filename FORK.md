@@ -5,66 +5,103 @@ through pull requests that pass the `Fork gate` workflow
 (`.github/workflows/fork-gate.yml`). `upstream` is a separate branch and is not
 part of this guidance.
 
+## Upstream baseline
+
+Upstream stable releases enter the trunk as a merge commit on the fixed `ezop` branch. The
+trunk and upstream history are never rebased, squashed or rewritten: the sync branch starts
+with one merge commit whose parents are the `ezop` head and the release commit, conflicts
+are resolved in that commit, and each carry that needs more than a conflict resolution is
+adapted or retired in its own commit after it. Only stable releases are synced, not
+upstream's development branch. A sync branch contains no upstream workflow files:
+`.github/workflows/` holds only `fork-*` files, which the gate's first step enforces.
+
+Current stable baseline: upstream release `v0.23.2`, commit
+`ae2a81ccc00e9b7c06301523e5bb09608397149c` (tag object
+`28f57ed8e3dba4eceb67dfd3e3abda1a7604452d`).
+
 ## Carried behaviours
 
 Behaviours this fork carries on top of upstream. At a later upstream sync, retire an entry
 once its retirement condition holds, and remove only that carry's changes and tests. The
 listed files are the main ones touched; many are shared with upstream code, so do not delete
-them wholesale.
+them wholesale. The disposition is what the `v0.23.2` sync decided: keep (upstream lacks it),
+adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
 
 - **ElevenLabs voice options.** The ElevenLabs TTS provider accepts `language_code` and
   `voice_settings` from `config.yaml`. Files: `tools/tts_tool_providers.py`,
   `hermes_cli/config_defaults.py`. Retire when upstream ElevenLabs TTS supports both options
-  natively.
+  natively. Disposition: keep; `v0.23.2` has neither option for TTS.
 - **Delegation context preamble.** `delegation.context_preamble` and
   `delegation.context_preamble_file` prepend operator-defined text to every delegated
   subagent task. Files: `tools/delegate_tool.py`, `tools/delegate_tool_progress.py`.
-  Retire when upstream offers an equivalent delegation preamble setting.
+  Retire when upstream offers an equivalent delegation preamble setting. Disposition: adapt;
+  the preamble is part of the child system prompt, which upstream now builds from
+  task-independent text only (the goal and context ride in the child's first message), so
+  it is passed to that builder as its own keyword.
 - **Session orientation file.** A file configured in `config.yaml` is loaded once per session
   and added to the system prompt. Files: `agent/wiki_orientation.py`, `agent/system_prompt.py`,
-  `hermes_cli/config_defaults_aux.py`. Retire when upstream supports a configurable
-  session-orientation file.
-- **Vault login filling across open shadow roots.** Login-field detection and filling also
-  reaches controls inside open shadow roots. File: `agent/vault_login_classifier.py`. The
-  browser test is an integration test and is skipped on the hosted gate. Retire when upstream
-  handles open shadow roots in vault login inspection and filling.
-- **Model-aware image credentials and explicit vision routing.** Codex credentials are looked
-  up per model, and an explicitly configured vision provider is honoured without a silent
-  fallback. The root and TUI `package.json` also raise `undici` and `zod` above versions with
-  published advisories. Files: `agent/auxiliary_client.py`, `tools/vision_tools.py`,
-  `plugins/image_gen/openai-codex/`, `package.json`, `ui-tui/package.json`. Retire when
-  upstream merges
+  `hermes_cli/config_defaults.py`. Retire when upstream supports a configurable
+  session-orientation file. Disposition: adapt; the profile home is bound through the scope
+  API instead of a raw setter, and the fork's copy of the auxiliary defaults factory was
+  dropped because upstream now ships the same one.
+- **Vault login filling across open shadow roots.** Upstream now finds and fills login
+  controls inside open shadow roots. What remains is keeping formless controls of different
+  shadow roots in separate groups, so split one-time-code boxes of one component are never
+  merged with another's. File: `agent/vault_login_classifier.py`. The browser test is an
+  integration test and is skipped on the hosted gate. Retire when upstream groups formless
+  shadow-root controls per root. Disposition: adapt.
+- **Model-aware image credentials and explicit vision routing.** Upstream scopes a Codex
+  pool cooldown to the requested model. The fork also resolves a context-variant model alias
+  to its wire model before that lookup, does not fall back to the single-account token when
+  the pool refused the model, honours an explicitly configured vision provider without a
+  silent fallback, and gives the image provider the model it will call. The fork's
+  `undici`/`zod` dependency raises are retired: upstream's workspace is at or above them.
+  Files: `agent/auxiliary_client.py`, `tools/vision_tools.py`,
+  `plugins/image_gen/openai-codex/`. Retire when upstream merges
   [NousResearch/hermes-agent#132164](https://github.com/NousResearch/hermes-agent/pull/132164)
-  (or an equivalent) and raises `undici` and `zod` itself.
+  (or an equivalent). Disposition: adapt.
 - **Matrix crypto ownership and one-time-key durability.** One owner serialises access to the
   Matrix crypto store, including standalone sends routed through the gateway; events whose keys
-  arrive late are recovered; one-time keys are persisted before they are published. Files:
+  arrive late are recovered; one-time keys are persisted before they are published. Standalone
+  sends do not use upstream's direct REST sender; they take the same shared-bot target rule as
+  upstream's live-adapter path before they reach the owner. Files:
   `plugins/platforms/matrix/adapter_crypto*.py`, `plugins/platforms/matrix/adapter_otk.py`,
-  `gateway/platform_send.py`, `tools/send_message_senders.py`. Retire when upstream gives the
+  `gateway/platform_send.py`, `gateway/outbound/senders.py`. Retire when upstream gives the
   Matrix crypto store a single owner with delayed-key recovery and durable one-time keys (for
   example by merging
   [NousResearch/hermes-agent#101220](https://github.com/NousResearch/hermes-agent/pull/101220)
-  plus the ownership and recovery pieces).
+  plus the ownership and recovery pieces). Disposition: adapt; the sender moved with upstream's
+  relocation of the outbound send code.
 - **Generic `pre_stop` plugin hook.** Plugins can check every text stop before the final answer
   is accepted and either send the agent back to work or end the turn as `Unresolved`; a
   callback that raises or times out counts as `Unresolved`. Files: `agent/turn_stop_gates.py`, `agent/turn_final_response.py`,
   `agent/turn_finalizer.py`, `hermes_cli/plugins_dispatch.py`. Retire when upstream ships an
-  equivalent hook that runs on every text stop and does not fail open.
+  equivalent hook that runs on every text stop and does not fail open. Disposition: keep;
+  upstream's `pre_verify` fires only after code edits.
 - **Context preserved when the compression summary is skipped or fails.**
   `compression.abort_on_summary_failure` also covers a skipped summary, and compression that
   makes no progress warns. Files: `agent/context_compressor.py`,
   `agent/context_compressor_prellm.py`, `agent/conversation_compression.py`. Retire when
-  upstream has the same behaviour.
+  upstream has the same behaviour. Disposition: keep.
 - **Mattermost voice posts.** `custom_voice_message` posts are treated as voice input, and an
-  audio-only `video/webm` attachment is reported as audio so speech-to-text accepts it. File:
-  `plugins/platforms/mattermost/adapter.py`. Retire when upstream's Mattermost adapter
-  supports both.
+  audio-only `video/webm` attachment is reported as audio so speech-to-text accepts it. Their
+  attachments are fetched only for a sender the gateway explicitly authorized, like any other
+  attachment. File: `plugins/platforms/mattermost/adapter.py`. Retire when upstream's
+  Mattermost adapter supports both. Disposition: adapt.
+- **Slack proxy-password test independent of `aiohttp-socks`.** The upstream test
+  `tests/gateway/outbound/test_send_message_slack.py::test_slack_dm_resolution_error_never_echoes_the_proxy_password`
+  expects `InvalidURL`, which only holds without `aiohttp-socks`. The gate installs the
+  `matrix` extra, which brings it in; its connector then rejects the malformed proxy URL with a
+  plain `ValueError`. The product code is unaffected (the password is redacted either way), so
+  the test hides `aiohttp_socks` and keeps both assertions. Retire when upstream's test no
+  longer depends on that package being absent.
 - **Compress-restart FIFO journey test does not assume which turn compacts.** The turn that
   trips the preflight compaction threshold depends on the system prompt's size, so on some
   hosted runners it is one turn earlier and the test's `PRESSURE_1` expectation failed. The
   test now checks that each follower request starts with the committed compacted
   transcript. File: `tests/gateway/test_journey_compress_restart_fifo.py`. Retire when
-  upstream's version of the test no longer depends on the compaction turn.
+  upstream's version of the test no longer depends on the compaction turn. Disposition: keep;
+  the `v0.23.2` test still assumes the turn.
 
 ## Running the gate locally
 
@@ -72,7 +109,8 @@ The gate (`.github/workflows/fork-gate.yml`) builds the test environment with th
 listed under `extras:` in that file, runs the static checks, then runs the Python suites in
 eight slices. Use an isolated `HERMES_HOME` so nothing touches an existing Hermes install.
 The Matrix extra builds against `libolm-dev`; the file search and doctor store probe tests
-need `ripgrep` (`rg`) on `PATH`.
+need `ripgrep` (`rg`) on `PATH`, and the source-build tests need `node` and `pnpm` on `PATH`
+(the runtime job installs the locked ones with `packages: pnpm` of `setup-pm`).
 
 ```bash
 export HERMES_HOME="$(mktemp -d)"

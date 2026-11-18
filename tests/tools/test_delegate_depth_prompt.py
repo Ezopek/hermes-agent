@@ -50,7 +50,7 @@ def test_dispatched_child_prompt_matches_depth_capability(
     if legacy_role is not None:
         args["role"] = legacy_role
     with (
-        patch.object(delegate_tool, "_load_config", return_value=config),
+        patch("tools.delegate_tool_config._load_config", return_value=config),
         patch.object(delegate_tool, "_resolve_workspace_hint", return_value=str(tmp_path)),
         patch("run_agent.AIAgent", return_value=child) as agent_class,
     ):
@@ -115,7 +115,6 @@ def test_profile_config_preamble_file_reaches_dispatched_child_prompt(tmp_path, 
     assert "error" not in result
     prompt = agent_class.call_args.kwargs["ephemeral_system_prompt"]
     assert "PARENT / PROFILE POLICY:\nInline rule.\n\nRead the team rules first." in prompt
-    assert "Inspect fixture" not in prompt
     assert child.run_conversation.call_args.kwargs["user_message"] == "Inspect fixture"
 
 
@@ -134,9 +133,8 @@ def test_configured_child_preamble_is_loaded_and_keeps_goal_in_user_turn(tmp_pat
     policy = tmp_path / "policy.md"
     policy.write_text("Read the team rules before acting.", encoding="utf-8")
     preamble = _load_context_preamble({"context_preamble_file": str(policy)})
-    prompt = _build_child_system_prompt("Inspect fixture", context_preamble=preamble)
+    prompt = _build_child_system_prompt(context_preamble=preamble)
     assert "PARENT / PROFILE POLICY:\nRead the team rules before acting." in prompt
-    assert "Inspect fixture" not in prompt
     assert _load_context_preamble({"context_preamble_file": str(tmp_path / "missing.md")}) == ""
 
 

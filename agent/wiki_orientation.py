@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -53,16 +54,16 @@ def agent_wiki_orientation_block(agent: Any) -> str:
     """Read once under the owning profile, including when context files are skipped."""
     block = getattr(agent, "_wiki_orientation_block", None)
     if not isinstance(block, str):
+        from agent.runtime_scope import bind_profile_scope
         from agent.system_prompt import _agent_home
-        from hermes_constants import (
-            get_hermes_home, reset_hermes_home_override, set_hermes_home_override,
-        )
+        from hermes_constants import get_hermes_home, hermes_home_key
 
-        token = set_hermes_home_override(_agent_home(agent) or get_hermes_home())
-        try:
+        # Read under the agent's own profile. Only a home other than the ambient one (a thread that lost
+        # the profile's context) needs a bind, so a bound scope, hosted ones included, is left alone.
+        home = _agent_home(agent) or get_hermes_home()
+        bind = hermes_home_key(home) != hermes_home_key(get_hermes_home())
+        with bind_profile_scope(home, hydrate_secrets=False) if bind else nullcontext():
             block = build_wiki_orientation_block()
-        finally:
-            reset_hermes_home_override(token)
         agent._wiki_orientation_block = block
     if "WIKI_ORIENTATION_ERROR" in block and not getattr(agent, "_wiki_orientation_status_emitted", False):
         emit = getattr(agent, "_emit_status", None)

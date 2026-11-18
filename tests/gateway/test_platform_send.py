@@ -137,6 +137,28 @@ async def test_served_profile_without_adapter_and_same_named_custom_home_refused
 
 
 @pytest.mark.asyncio
+async def test_shared_bot_target_rule_refuses_in_process_and_over_the_control_socket(owner, monkeypatch):
+    """A target no ``gateway.profile_routes`` entry maps to a shared-bot profile is never sent through the owner."""
+    home, runner, _adapter, wire = owner
+    from gateway.config import Platform
+    from gateway.platform_send import send_via_owner
+    import gateway.run
+    monkeypatch.setattr(gateway.run, "_gateway_runner_ref", lambda: runner)
+    monkeypatch.setattr(runner, "_shared_bot_target_allowed", lambda *args, **kwargs: False)
+    runner._gateway_loop = asyncio.get_running_loop()
+    result = await send_via_owner(Platform.MATRIX, "!room:example.org", "not routed to this profile")
+    assert "shares the default profile's bot" in result["error"]
+    monkeypatch.setattr(GatewayControlServer, "start", AsyncMock(return_value=True))
+    server = await _start_gateway_start_control_socket(runner)
+    try:
+        refused = await private_exchange(server, params(home))
+        assert "shares the default profile's bot" in refused["result"]["error"]
+    finally:
+        await server.stop()
+    assert not wire
+
+
+@pytest.mark.asyncio
 async def test_accepted_timeout_does_not_resend_or_connect(owner, monkeypatch):
     from gateway import platform_send
     home, runner, adapter, wire = owner

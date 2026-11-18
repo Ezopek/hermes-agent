@@ -240,26 +240,27 @@ def build_otp_fills(otp_controls: list[ClassifiedLoginControl], code: str) -> li
     return [{"index": best.control.index, "token": "one-time-code", "value": code}]
 
 
-# Walk only the current document and its open shadow roots; never enter iframe documents.
-# Reused by inspection and mutation so nonce stamps resolve in the same search scope.
-_OPEN_DOM_ROOTS_JS = """const roots = [document];
-  for (let i = 0; i < roots.length; i++) {
-    for (const element of roots[i].querySelectorAll("*")) {
-      if (element.shadowRoot) roots.push(element.shadowRoot);
-    }
-  }"""
-
-
 def build_inspection_js(nonce: str) -> str:
-    return (_LOGIN_CONTROL_INSPECTION_JS_TEMPLATE.replace("__NONCE__", json.dumps(nonce))
-            .replace("__OPEN_DOM_ROOTS__", _OPEN_DOM_ROOTS_JS))
+    return _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE.replace("__NONCE__", json.dumps(nonce))
 
 
 _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
   const nonce = __NONCE__;
-  __OPEN_DOM_ROOTS__
-  const elements = roots.flatMap((root) => Array.from(root.querySelectorAll("input, select")));
-  const forms = roots.flatMap((root) => Array.from(root.querySelectorAll("form")));
+  // Shadow-piercing collect: many logins (Home Assistant, custom-element SPAs) render their
+  // form inside a shadow root, where document.querySelectorAll never sees it. Walk every
+  // element (shadow hosts can be anything, not just inputs) and recurse into open shadow roots.
+  // Forms are collected in the same walk: document.forms misses a <form> inside a shadow root, which
+  // would leave its controls ungrouped (formIndex null) and merge split OTP boxes across forms.
+  const elements = [];
+  const forms = [];
+  const shadowScopes = [];
+  (function walk(root) {
+    for (const e of root.querySelectorAll("*")) {
+      if (e.tagName === "INPUT" || e.tagName === "SELECT") elements.push(e);
+      else if (e.tagName === "FORM") forms.push(e);
+      if (e.shadowRoot) walk(e.shadowRoot);
+    }
+  })(document);
   elements.forEach((element, index) => element.setAttribute("data-hermes-vault-slot", nonce + ":" + index));
   const out = elements.flatMap((element, index) => {
     if (element.disabled || element.readOnly) return [];
@@ -267,16 +268,18 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility === "hidden" || element.getClientRects().length === 0) return [];
     const labels = element.labels ? Array.from(element.labels, (l) => l.textContent || "") : [];
-    const root = element.getRootNode();
     const ariaText = (element.getAttribute("aria-labelledby") || "")
       .split(/\\s+/).filter(Boolean)
-      .map((id) => { const n = root.getElementById(id); return n ? (n.textContent || "") : ""; })
+      .map((id) => { const r = element.getRootNode(); const n = (r.getElementById ? r.getElementById(id) : null) || document.getElementById(id); return n ? (n.textContent || "") : ""; })
       .join(" ");
     const resolvedFormIndex = element.form ? forms.indexOf(element.form) : -1;
+    // Formless controls in different shadow roots get distinct negative group ids, so split
+    // one-time-code boxes of one component are never merged with another component's.
+    const scope = element.getRootNode();
+    if (scope !== document && !shadowScopes.includes(scope)) shadowScopes.push(scope);
     return [{
       autocomplete: element.autocomplete || "",
-      // Separate formless shadow scopes so split OTP digits cannot cross components.
-      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : (root === document ? null : -(roots.indexOf(root) + 1)),
+      formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : (scope === document ? null : -(shadowScopes.indexOf(scope) + 1)),
       index,
       maxLength: element.maxLength > 0 ? element.maxLength : null,
       label: [
@@ -310,8 +313,7 @@ def build_fill_js(fills: list[dict[str, Any]], expected_origin: str, nonce: str 
         [{"index": f["index"], "token": f.get("token", "current-password"), "value": f["value"]} for f in fills]
     )
     return (_FILL_JS_TEMPLATE.replace("__EXPECTED_ORIGIN__", json.dumps(expected_origin))
-            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce))
-            .replace("__OPEN_DOM_ROOTS__", _OPEN_DOM_ROOTS_JS))
+            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce)))
 
 
 _FILL_JS_TEMPLATE = """(() => {
@@ -321,12 +323,18 @@ _FILL_JS_TEMPLATE = """(() => {
   }
   const fills = __FILLS__;
   const nonce = __NONCE__;
-  __OPEN_DOM_ROOTS__
+  // Stamped controls may live inside a shadow root (see the inspection script's walk): collect the
+  // document and every open shadow root once, then look each stamp up in those roots.
+  const roots = [];
+  (function walk(root) {
+    roots.push(root);
+    for (const e of root.querySelectorAll("*")) if (e.shadowRoot) walk(e.shadowRoot);
+  })(document);
+  const find = (selector) => roots.flatMap((r) => Array.from(r.querySelectorAll(selector)));
   let filled = 0;
   const norm = (t) => String(t || "").trim().toLowerCase();
   for (const f of fills) {
-    const selector = '[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]';
-    const el = roots.map((root) => root.querySelector(selector)).find(Boolean);
+    const el = find('[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]')[0];
     if (!el || (f.token === "current-password" && el.type !== "password")) continue;
     try {
       if (el.tagName === "SELECT") {
@@ -339,11 +347,12 @@ _FILL_JS_TEMPLATE = """(() => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
       // one-time-code split into single-character boxes: f.value is the slice for THIS box (see build_otp_fills)
       if (setter && setter.set) { setter.set.call(el, f.value); } else { el.value = f.value; }
+      // composed: a component listening on its shadow host must see the value change too.
       el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText" }));
       el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       if (el.value.length > 0) filled += 1;
     } catch (e) { /* skip */ }
   }
-  roots.forEach((root) => root.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot")));
+  find("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
   return JSON.stringify({ filled });
 })()"""

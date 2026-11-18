@@ -76,7 +76,8 @@ def test_no_progress_rejection_warns_and_leaves_the_session_untouched(db):
     assert agent.context_compressor._structural_no_op_backoff_until > time.monotonic()
     assert [(p["commit_status"], p["failure_class"]) for p in payloads] == [("aborted", "no_progress")]
 
-    warnings = [args[1] for args in statuses if args and args[0] == "warn"]
+    # Other warnings (e.g. no summary model configured in this fixture) are not under test.
+    warnings = [args[1] for args in statuses if args and args[0] == "warn" and "no progress" in args[1]]
     assert len(warnings) == 1, statuses
     assert "unchanged" in warnings[0]
     # Nothing was lost and nothing is wrong with the session: no retry/reset advice.

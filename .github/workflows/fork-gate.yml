@@ -80,6 +80,8 @@ jobs:
       - name: Prepare the pinned test toolchain
         uses: ./.github/actions/setup-pm
         with:
+          # The source-build tests drive the real pnpm builders; pnpm brings the locked Node.
+          packages: pnpm
           test-environment: 'true'
           extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain", "matrix", "messaging"]'
       - name: Run Python runtime and carried-behavior coverage

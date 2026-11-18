@@ -268,7 +268,7 @@ async def test_decrypted_media_uses_ordinary_admission_lifetime(native_owner, mo
     adapter, machine, admitted, _attempted = native_owner
     ingress = adapter._crypto_ingress
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    async def download(url):
+    async def download(_client, url, _max_bytes):
         started.set()
         try:
             await release.wait()
@@ -276,7 +276,7 @@ async def test_decrypted_media_uses_ordinary_admission_lifetime(native_owner, mo
         except asyncio.CancelledError:
             cancelled.set()
             raise
-    adapter._client.download_media = AsyncMock(side_effect=download)
+    monkeypatch.setattr("plugins.platforms.matrix.adapter.download_mxc_capped", AsyncMock(side_effect=download))
     cached = str(tmp_path / "document.bin")
     monkeypatch.setattr(base, "cache_document_from_bytes_async", AsyncMock(return_value=cached))
     outbound = olm.OutboundGroupSession()

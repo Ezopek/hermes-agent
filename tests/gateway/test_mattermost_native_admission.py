@@ -17,6 +17,7 @@ from gateway.platforms.base import SendResult, cache_image_from_bytes_async
 from gateway.run import GatewayRunner
 from gateway.session_authority import initialize_session_authority
 from gateway.session_results import execution_result
+from tests.gateway.test_mattermost_voice_post import _WebmResponse
 from tests.waiting import async_wait_until
 
 SENDER = 'user_123'
@@ -94,10 +95,7 @@ async def test_custom_voice_post_honors_user_allowlist_through_native_admission(
         return decisions[-1][1]
 
     monkeypatch.setattr(runner, '_is_user_authorized_for_source', authorized)
-    resp = AsyncMock(status=200, read=AsyncMock(return_value=b'\x1a\x45\xdf\xa3 fake webm'))
-    resp.__aenter__ = AsyncMock(return_value=resp)
-    resp.__aexit__ = AsyncMock(return_value=False)
-    adapter._session = MagicMock(get=MagicMock(return_value=resp))
+    adapter._session = MagicMock(get=MagicMock(return_value=_WebmResponse(b'\x1a\x45\xdf\xa3 fake webm')))
     monkeypatch.setattr(adapter, '_api_get', AsyncMock(return_value={'name': 'voice.webm', 'mime_type': 'video/webm'}))
 
     async def send(chat_id, content, **_):
