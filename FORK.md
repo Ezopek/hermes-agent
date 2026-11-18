@@ -62,15 +62,18 @@ adapt (upstream has part of it, the rest stays) or retire (upstream covers it).
   (or an equivalent). Disposition: adapt.
 - **Matrix crypto ownership and one-time-key durability.** One owner serialises access to the
   Matrix crypto store, including standalone sends routed through the gateway; events whose keys
-  arrive late are recovered; one-time keys are persisted before they are published. Standalone
+  arrive late are recovered; one-time keys are persisted before they are published, and a batch
+  whose upload outcome is unknown is retired (private keys kept, IDs never published again) so
+  a peer's claimed key is not handed to a second peer. Standalone
   sends do not use upstream's direct REST sender; they take the same shared-bot target rule as
   upstream's live-adapter path before they reach the owner. Files:
   `plugins/platforms/matrix/adapter_crypto*.py`, `plugins/platforms/matrix/adapter_otk.py`,
   `gateway/platform_send.py`, `gateway/outbound/senders.py`. Retire when upstream gives the
-  Matrix crypto store a single owner with delayed-key recovery and durable one-time keys (for
-  example by merging
+  Matrix crypto store a single owner with delayed-key recovery and durable one-time keys that
+  never republish an uncertain batch's IDs (merging
   [NousResearch/hermes-agent#101220](https://github.com/NousResearch/hermes-agent/pull/101220)
-  plus the ownership and recovery pieces). Disposition: adapt; the sender moved with upstream's
+  alone does not: it re-uploads such a batch; it needs the ownership and recovery pieces and
+  that rule). Disposition: adapt; the sender moved with upstream's
   relocation of the outbound send code.
 - **Generic `pre_stop` plugin hook.** Plugins can check every text stop before the final answer
   is accepted and either send the agent back to work or end the turn as `Unresolved`; a
