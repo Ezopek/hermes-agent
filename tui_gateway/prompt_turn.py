@@ -412,8 +412,9 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
             pass  # transient DB failure — keep pending_title for retry
     # Voice fallback when the streaming pipeline couldn't start (tts_queue already spoke
     # everything otherwise); barge-aware.
-    # A turn held for a pre_stop verdict streamed nothing of its answer to the queue.
-    if (st.tts_queue is None or getattr(st.agent, "_hold_stream", False)) and isinstance(raw, str) and raw.strip() and _voice_tts_enabled():
+    if st.tts_queue is not None and getattr(st.agent, "_hold_stream", False) and isinstance(raw, str) and raw.strip():
+        st.tts_queue.put(raw)  # a pre_stop-held turn streamed none of its answer; speak it on the queue Stop and voice-off drive
+    elif st.tts_queue is None and isinstance(raw, str) and raw.strip() and _voice_tts_enabled():
         try:
             from agent.memory_provider import spawn_context_thread
             spawn_context_thread(_speak_text_with_barge, name="voice-tts-fallback", args=(raw,)).start()
