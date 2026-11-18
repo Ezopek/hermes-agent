@@ -1,6 +1,9 @@
 """Native libolm/SQLite regressions for durable OTK uploads and uncertain responses.
 
 The API transport below simulates acceptance/response loss; it never sends HTTP.
+A batch whose upload outcome is unknown may already be claimed by a peer, so it is
+never published again: its private keys stay (sessions peers already started must
+decrypt) and the next upload carries fresh key IDs.
 """
 
 import asyncio
@@ -58,6 +61,21 @@ class Transport:
 def _signed(account):
     # Request signatures without generating additional keys.
     return account.get_one_time_keys(USER, DEVICE, account.max_one_time_keys // 2)
+
+
+def _decrypts(account, uploaded_key):
+    """Real pre-key round trip against ``uploaded_key``; consumes it from ``account``."""
+    sender = OlmAccount()
+    encrypted = sender.new_outbound_session(account.identity_key, uploaded_key["key"]).encrypt("claimed")
+    return account.new_inbound_session(sender.identity_key, encrypted.body).decrypt(encrypted) == "claimed"
+
+
+async def _assert_retired(db, old_upload, new_upload):
+    """``new_upload`` shares no ID with ``old_upload``, whose private keys are still durable."""
+    old, new = old_upload["one_time_keys"], new_upload["one_time_keys"]
+    assert new and not set(old) & set(new), "an uncertain batch's key IDs were published again"
+    for key in old.values():
+        assert _decrypts(await _fresh_account(db), key), "private key of an uncertain batch was lost"
 
 
 async def _fresh_account(db):
@@ -136,7 +154,7 @@ async def test_preupload_persistence_failure_prevents_upload(native_owner, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["exception", "cancel", "malformed"])
-async def test_uncertain_upload_keeps_same_batch_on_retry(native_owner, failure):
+async def test_uncertain_upload_is_never_republished(native_owner, failure):
     machine, transport = native_owner
 
     async def lose_response(content):
@@ -149,28 +167,29 @@ async def test_uncertain_upload_keeps_same_batch_on_retry(native_owner, failure)
     transport.on_upload = lose_response
     expected_error = {"cancel": asyncio.CancelledError, "malformed": MatrixResponseError,
                       "exception": ConnectionError}[failure]
-    for _ in range(3):
-        with pytest.raises(expected_error):
-            await machine.share_keys(0)
-        assert _signed(machine.account) == transport.uploads[0]["one_time_keys"], "retry replaced unpublished OTKs"
-        stored = await _fresh_account(machine.crypto_store.db)
-        assert _signed(stored) == transport.uploads[0]["one_time_keys"], "uncertain upload has no durable private keys"
-    assert all(payload == transport.uploads[0] for payload in transport.uploads)
+    with pytest.raises(expected_error):
+        await machine.share_keys(0)
+    assert _signed(machine.account) == transport.uploads[0]["one_time_keys"]
+    stored = await _fresh_account(machine.crypto_store.db)
+    assert _signed(stored) == transport.uploads[0]["one_time_keys"], "uncertain upload has no durable private keys"
+    # A peer may have claimed a key of the first batch; every later share (the sync handler
+    # fires on the count drop that claim causes) must publish only fresh IDs.
     transport.on_upload = None
-    await machine.share_keys(0)
-    assert transport.uploads[-1] == transport.uploads[0]
+    machine._last_key_share = time.monotonic() - 61
+    await machine.share_keys(49)
+    await _assert_retired(machine.crypto_store.db, transport.uploads[0], transport.uploads[1])
     assert not _signed(machine.account)
 
 
 @pytest.mark.asyncio
-async def test_reloaded_unpublished_batch_is_reused_without_generation(native_owner):
+async def test_reloaded_unpublished_batch_is_retired_not_republished(native_owner):
     machine, transport = native_owner
     pending = machine.account.get_one_time_keys(USER, DEVICE, 0)
     await machine.crypto_store.put_account(machine.account)
     machine.crypto_store = PgCryptoStore(USER, PICKLE_KEY, machine.crypto_store.db)
     await machine.load()
     await machine.share_keys(0)
-    assert transport.uploads[0]["one_time_keys"] == pending, "reload replaced a durable unpublished batch"
+    await _assert_retired(machine.crypto_store.db, {"one_time_keys": pending}, transport.uploads[0])
 
 
 @pytest.mark.asyncio
@@ -201,7 +220,7 @@ async def _exit_at_upload(path, payload_path):
 
 
 @pytest.mark.asyncio
-async def test_process_exit_at_upload_reopens_and_reuses_private_keys(tmp_path):
+async def test_process_exit_at_upload_reopens_keeps_private_keys_and_publishes_fresh_ids(tmp_path):
     path, payload = tmp_path / "store", tmp_path / "accepted.json"
     script = (
         "import asyncio, sys\n"
@@ -227,8 +246,8 @@ async def test_process_exit_at_upload_reopens_and_reuses_private_keys(tmp_path):
     finally:
         await db.stop()
     transport = Transport(count=0)
-    async with _owner(path, transport):
-        assert transport.uploads[0]["one_time_keys"] == accepted["one_time_keys"]
+    async with _owner(path, transport) as reopened:
+        await _assert_retired(reopened.crypto_store.db, accepted, transport.uploads[0])
 
 
 @pytest.mark.asyncio
@@ -251,7 +270,7 @@ async def test_success_persists_publication_and_noop_preserves_store(native_owne
 
 
 @pytest.mark.asyncio
-async def test_final_persistence_failure_retains_recoverable_preupload_state(native_owner, monkeypatch):
+async def test_final_persistence_failure_retains_recoverable_private_keys(native_owner, monkeypatch):
     machine, transport = native_owner
     original = machine.crypto_store.put_account
 
@@ -266,11 +285,13 @@ async def test_final_persistence_failure_retains_recoverable_preupload_state(nat
     assert len(transport.uploads) == 1
     stored = await _fresh_account(machine.crypto_store.db)
     assert _signed(stored) == transport.uploads[0]["one_time_keys"]
-    # A reload recovers unpublished IDs; the helper itself never spins/retries.
+    # A reload recovers the private keys; the helper itself never spins/retries.
     machine.account = stored
     monkeypatch.setattr(machine.crypto_store, "put_account", original)
+    transport.count = 0
+    machine._last_key_share = time.monotonic() - 61
     await machine.share_keys(0)
-    assert transport.uploads[1] == transport.uploads[0]
+    await _assert_retired(machine.crypto_store.db, transport.uploads[0], transport.uploads[1])
 
 
 @pytest.mark.asyncio
@@ -320,7 +341,7 @@ async def test_device_only_upload_control(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", ["not-a-count", True, -1, 1.5])
 @pytest.mark.parametrize("algorithm", ["signed_curve25519", "curve25519"])
-async def test_invalid_upload_counts_preserve_batch_for_retry_and_reopen(tmp_path, count, algorithm):
+async def test_invalid_upload_counts_retire_batch_for_retry_and_reopen(tmp_path, count, algorithm):
     path = tmp_path / "store"
     transport = Transport()
     async with _owner(path, transport) as machine:
@@ -333,21 +354,19 @@ async def test_invalid_upload_counts_preserve_batch_for_retry_and_reopen(tmp_pat
             return {"one_time_key_counts": {"signed_curve25519": 50, algorithm: count}}
 
         transport.on_upload = invalid_response
-        for _ in range(2):
-            with pytest.raises(ValueError, match="^Invalid one-time key counts response$"):
-                await machine.share_keys(0)
-            assert not machine.account.shared
-            assert machine._last_key_share == last_share
-            pending = transport.uploads[0]["one_time_keys"]
-            assert pending and _signed(machine.account) == pending
-            stored = await _fresh_account(machine.crypto_store.db)
-            assert not stored.shared and _signed(stored) == pending
-        assert transport.uploads[1] == transport.uploads[0]
+        with pytest.raises(ValueError, match="^Invalid one-time key counts response$"):
+            await machine.share_keys(0)
+        assert not machine.account.shared
+        assert machine._last_key_share == last_share
+        pending = transport.uploads[0]["one_time_keys"]
+        assert pending and _signed(machine.account) == pending
+        stored = await _fresh_account(machine.crypto_store.db)
+        assert not stored.shared and _signed(stored) == pending
         original_upload = transport.uploads[0]
-    # A new database, store and machine must recover the same unpublished IDs.
-    retry = Transport()
+    # A new database, store and machine must keep the private keys and publish fresh IDs.
+    retry = Transport(count=0)
     async with _owner(path, retry) as reloaded:
-        assert retry.uploads == [original_upload]
+        await _assert_retired(reloaded.crypto_store.db, original_upload, retry.uploads[0])
         assert reloaded.account.shared and not _signed(reloaded.account)
         stored = await _fresh_account(reloaded.crypto_store.db)
         assert stored.shared and not _signed(stored)
@@ -355,7 +374,7 @@ async def test_invalid_upload_counts_preserve_batch_for_retry_and_reopen(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", ["not-a-count", True, -1, 1.5])
-async def test_invalid_probe_counts_preserve_durable_pending_batch(native_owner, count):
+async def test_invalid_probe_counts_leave_pending_batch_until_a_valid_upload_retires_it(native_owner, count):
     machine, transport = native_owner
     machine.account.shared = False
     pending = machine.account.get_one_time_keys(USER, DEVICE, 0)
@@ -371,7 +390,7 @@ async def test_invalid_probe_counts_preserve_durable_pending_batch(native_owner,
     assert not stored.shared and _signed(stored) == pending
     transport.count = 0
     await machine.share_keys()
-    assert transport.uploads[0]["one_time_keys"] == pending
+    await _assert_retired(machine.crypto_store.db, {"one_time_keys": pending}, transport.uploads[0])
     assert machine.account.shared and not _signed(machine.account)
 
 
