@@ -208,7 +208,7 @@ def test_stream_observers_get_the_accepted_answer_once_and_never_the_draft(monke
         [Text(DRAFT, chunk_chars=5), Text(ANSWER, chunk_chars=5)])
     assert result["final_response"] == ANSWER
     assert "".join(kw["delta"] for kw in deltas) == ANSWER
-    assert [kw["final_text"] for kw in ends if kw["final_text"]] == [ANSWER]
+    assert [(kw["final_text"], kw["finished"]) for kw in ends] == [(ANSWER, True)]  # one end, carrying the answer
     assert not any(DRAFT[:5] in str(kw) for kw in deltas + ends)
 
 
@@ -218,7 +218,7 @@ def test_stream_observers_get_the_unresolved_notice_and_never_the_draft(monkeypa
     notice = result["final_response"]
     assert notice.startswith("Unresolved") and DRAFT not in notice
     assert "".join(kw["delta"] for kw in deltas) == notice
-    assert [kw["final_text"] for kw in ends if kw["final_text"]] == [notice]
+    assert [(kw["final_text"], kw["finished"]) for kw in ends] == [(notice, True)]
     assert not any(DRAFT[:5] in str(kw) for kw in deltas + ends)
 
 
@@ -231,3 +231,32 @@ def test_the_observer_end_event_still_carries_the_streamed_text_without_a_pre_st
         _run(srv.base_url)
     shutdown_plugin_stream_hook_dispatcher()
     assert [kw["final_text"] for kw in ends] == [ANSWER]
+
+
+@pytest.mark.parametrize("hooked", [False, True], ids=["control_no_hook", "pre_stop_hook"])
+def test_the_released_clarify_prose_row_is_stored_visible(monkeypatch, hooked):
+    """A history load after a reconnect shows the explanation beside the pending question, not only the question."""
+    _register(monkeypatch, (lambda **_kw: None) if hooked else None)
+    script = [ToolCall("clarify", {"questions": [{"question": "Which one?", "choices": ["A", "B"]}]}, text=PROSE),
+              Text(ANSWER, chunk_chars=5)]
+    with FakeLLMServer(script) as srv:
+        result, _events = _clarify_run(srv.base_url, "interim")
+    row = next(m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert row["content"] == PROSE and row.get("display_kind") != "hidden"
+
+
+def test_a_hold_stream_transform_keeps_the_clarify_prose_row_hidden(monkeypatch):
+    """Control: a transform must see all text first, so its turn releases nothing and hides the row."""
+    import hermes_cli.plugins as plugins_mod
+
+    mgr = PluginManager()
+    mgr._discovered = True
+    ctx = PluginContext(PluginManifest(name="probe", source="user"), mgr)
+    ctx.register_hook("transform_llm_output", lambda **_kw: None, hold_stream=True)
+    monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+    script = [ToolCall("clarify", {"questions": [{"question": "Which one?", "choices": ["A", "B"]}]}, text=PROSE),
+              Text(ANSWER, chunk_chars=5)]
+    with FakeLLMServer(script) as srv:
+        result, _events = _clarify_run(srv.base_url, "interim")
+    row = next(m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert row.get("display_kind") == "hidden"
