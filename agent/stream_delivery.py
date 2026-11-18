@@ -216,17 +216,32 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = set()
             self._delivered_interim_texts.add(normalized)
 
+    def _releases_clarify_prose(self, asks_clarify: bool) -> bool:
+        """True for the prose beside a ``clarify`` call on a turn held only by ``pre_stop``. That message is a tool
+        call, never a text stop, so ``pre_stop`` never judges the prose and the user needs it to decide what to
+        pick. A ``hold_stream`` transform must see all text first, so its turns never release."""
+        return asks_clarify and not getattr(self, "_held_transforms", None)
+
+    def _stream_released_prose(self, text: str, *, already_streamed: bool = False) -> None:
+        """Send released prose through the display + TTS delta callbacks, past the hold."""
+        if [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)].count(True):
+            self._record_streamed_assistant_text(text)
+
     def _deliver_interim(self, visible: str, *, already_streamed: bool, record: list[str],
                          asks_clarify: bool = False) -> None:
         """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors.
-        Commentary is model text ``transform_llm_output`` never sees, so a held turn drops it. With interim
-        messages off, prose in the same message as a ``clarify`` call still goes to
-        ``clarify_context_callback``: it is what the user is asked to decide on."""
-        if getattr(self, "_hold_stream", False):
+        Commentary is model text ``transform_llm_output`` never sees, so a held turn drops it, except the prose
+        beside a ``clarify`` call (``_releases_clarify_prose``). With interim messages off, that prose goes to
+        ``clarify_context_callback``: it is what the user is asked to decide on; a front end with neither (the CLI)
+        gets it through its delta callbacks, which the hold kept silent."""
+        held = getattr(self, "_hold_stream", False)
+        if held and not self._releases_clarify_prose(asks_clarify):
             return
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None and asks_clarify:
             cb = getattr(self, "clarify_context_callback", None)
+        if cb is None and held:
+            cb = self._stream_released_prose
         if cb is None:
             return
         try:
@@ -273,7 +288,8 @@ class StreamDeliveryMixin:
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
         already_streamed = self._interim_content_fully_streamed(visible)
-        self._enqueue_stream_hook("on_interim_message", text=visible, already_streamed=already_streamed)
+        if not getattr(self, "_hold_stream", False) or self._releases_clarify_prose(asks_clarify):
+            self._enqueue_stream_hook("on_interim_message", text=visible, already_streamed=already_streamed)
         self._deliver_interim(visible, already_streamed=already_streamed,
                               record=[visible] if clarify_content else undelivered_parts or [visible],
                               asks_clarify=asks_clarify)
@@ -356,7 +372,8 @@ class StreamDeliveryMixin:
         self._enqueue_stream_hook("on_stream_start")
 
     def _emit_stream_end(self, *, final_text: str, finished: bool, error: str | None) -> None:
-        self._enqueue_stream_hook("on_stream_end", final_text=final_text, finished=finished, error=error)
+        held = getattr(self, "_hold_stream", False)  # the draft may still be rejected: observers get no text of it
+        self._enqueue_stream_hook("on_stream_end", final_text="" if held else final_text, finished=finished, error=error)
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
@@ -392,7 +409,8 @@ class StreamDeliveryMixin:
         if not text:
             return
         delivered = self._deliver_to_stream_callbacks(text)
-        self._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
+        if not getattr(self, "_hold_stream", False):  # observers (TTS, dashboards) wait for the verdict too
+            self._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
         if delivered:
             self._record_streamed_assistant_text(text)
 
