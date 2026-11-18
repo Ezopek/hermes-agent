@@ -193,6 +193,31 @@ def test_budget_exhaustion_after_an_earlier_gate_never_publishes_a_draft_pre_sto
     assert last.get("api_content") == "unjudged draft"
 
 
+def test_budget_notice_is_stored_when_the_draft_was_continued_after_a_length_cut(agent, monkeypatch):
+    """The stored tail is only the last fragment of the joined draft the gate saw."""
+    agent.max_iterations = 2
+    agent.iteration_budget.max_total = 2
+    _register(monkeypatch, pre_verify=[lambda **_kw: {"action": "continue", "message": "run the tests"}],
+              pre_stop=[lambda **_kw: None])
+    cut, rest = _response("first fragment of the draft, "), _response("second fragment")
+    cut.choices[0].finish_reason = "length"
+    answers = iter([cut, rest])
+
+    def edited(_api_kwargs):
+        agent._turn_file_mutation_paths = {"changed.py"}
+        return next(answers)
+
+    agent._interruptible_api_call = edited
+
+    result = agent.run_conversation("edit the file")
+
+    assert result["final_response"].startswith("Unresolved")
+    last = result["messages"][-1]
+    assert last["role"] == "assistant" and last["content"] == result["final_response"]
+    assert last.get("display_kind") != "hidden"
+    assert "second fragment" in last.get("api_content", "")
+
+
 def test_budget_exhaustion_without_a_draft_publishes_the_notice_not_a_summary(agent, monkeypatch):
     agent.max_iterations = 1
     agent.iteration_budget.max_total = 1
