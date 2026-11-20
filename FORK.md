@@ -325,6 +325,103 @@ For a release sync that means:
 - A race where `ezop` moves after the last check in step 5. The tree comparison in step 6
   detects it; nothing prevents it.
 
+## Upstream contributions
+
+How an open upstream pull request whose head is a branch of this fork is refreshed (a new
+base, review fixes). This is a manual procedure for the operator, or for a delegate the
+operator names. It is not an agent delivery mode; agents only prepare its inputs (the
+candidate branch, a backup branch, tests and texts).
+
+The ordinary delivery cannot carry such a change: it needs a pull request into `ezop` with a
+green `gate`, and `gate` cannot run on an upstream tree.
+
+### Scope and refs
+
+- Only branches that back an open upstream pull request authored by the operator. This is
+  not a way to push to any other fork branch, and it never rewrites `ezop`, `upstream` or
+  `main`.
+- No pull request inside the fork carries an upstream tree: it has no `gate` (the tree holds
+  upstream workflows, not `fork-*` ones), its diff would span the upstream history, and it
+  would run upstream workflows in the fork.
+- The candidate branch `<ISSUE-ID>-…` is an ordinary fork branch, pushed without a pull
+  request. Before the first push, check that no workflow in its tree has a push trigger that
+  matches the branch name.
+- The upstream base commit (`BASE`) is fetched into a local ref and never pushed. That keeps
+  the rule that nobody pushes upstream tags or other upstream refs to the fork: no ref in
+  the fork names an upstream commit; the candidate only has it as an ancestor.
+
+### Procedure
+
+`<N>` is the upstream pull request number, `<branch>` its head branch in the fork and
+`<upstream URL>` the upstream repository. `BASE` and `SHA` (the candidate) are the full
+SHAs recorded on the issue.
+
+1. **Prepare the inputs** (agent). Fetch upstream `main` into a local ref and record its full
+   SHA as `BASE`. Rebase the contribution onto `BASE`; fixes go in as separate commits. Run
+   the tests for the changed area and `scripts/check` with a temporary `HERMES_HOME` and no
+   credentials. Push the candidate `<ISSUE-ID>-…` and a backup `<ISSUE-ID>-pr<N>-prev` that
+   points at the current head of `<branch>`. On the issue, record the candidate SHA, `BASE`,
+   the commands with their exit codes, and what the tests do not cover. The pull request
+   description and the reply to reviewers are issue documents.
+
+2. **Review** (delegate). In a clean clone, check out the exact candidate SHA detached and
+   review it against `BASE` held in a local ref:
+
+   ```bash
+   git fetch origin <candidate branch>
+   git fetch <upstream URL> "$BASE:refs/review/base" &&
+   test "$(git rev-parse refs/review/base)" = "$BASE" &&
+   git merge-base --is-ancestor refs/review/base "$SHA" &&
+   git switch --detach "$SHA" &&
+   laura-review --base refs/review/base "<what changed and the feedback it answers>"
+   ```
+
+   Record the verdict, the SHA and the findings on the issue. Fixes come back as new commits
+   on the candidate and a new round with the new SHA, until the final SHA is approved.
+
+3. **Publish** (delegate). Confirm that the candidate still points at the reviewed SHA and
+   that the head of `<branch>` is the one the backup points at. A different head (for example
+   a maintainer's commit) stops the sequence: the inputs are prepared again on the new head.
+
+   ```bash
+   git fetch origin &&
+   test "$(git rev-parse origin/<candidate branch>)" = "$SHA" &&
+   OLD=$(git ls-remote origin "refs/heads/<branch>" | cut -f1) &&
+   test "$OLD" = "$(git rev-parse origin/<ISSUE-ID>-pr<N>-prev)" &&
+   git push --force-with-lease="refs/heads/<branch>:$OLD" origin "$SHA:refs/heads/<branch>"
+   ```
+
+   The push names the SHA, not a branch, and the lease rejects it if the head moved since it
+   was read.
+
+4. **Verify** (delegate). All of these must hold, and the checks and statuses are reported as
+   found: no checks, or checks waiting for a maintainer, are not a pass.
+
+   ```bash
+   git ls-remote origin "refs/heads/<branch>"       # equals $SHA
+   gh pr view <N> -R <upstream repo> --json headRefOid,mergeable,statusCheckRollup
+   git diff --stat "$BASE...$SHA"                    # only the contribution's files
+   ```
+
+   `headRefOid` must equal `$SHA` and `mergeable` must not be `CONFLICTING`.
+
+5. **Texts.** The description and any reply are checked against the public boundary before
+   they are published: no internal names, hosts, paths, secrets or private evidence. Who
+   publishes them, and from which account, is recorded with the operator's delegation, not
+   here.
+
+### Rollback
+
+Push the backup back to the pull request branch, with the lease on the published SHA:
+
+```bash
+git fetch origin &&
+git push --force-with-lease="refs/heads/<branch>:$SHA" \
+  origin "$(git rev-parse origin/<ISSUE-ID>-pr<N>-prev):refs/heads/<branch>"
+```
+
+The candidate and backup branches are deleted once the upstream pull request is closed.
+
 ## Updating the installed checkout
 
 How a Hermes installation that runs this fork's code from a git checkout is moved to a new
