@@ -337,9 +337,11 @@ green `gate`, and `gate` cannot run on an upstream tree.
 
 ### Scope and refs
 
-- Only branches that back an open upstream pull request authored by the operator. This is
-  not a way to push to any other fork branch, and it never rewrites `ezop`, `upstream` or
-  `main`.
+- Only branches that back an open upstream pull request authored by the operator, and only
+  those the operator has named for this procedure. Naming a branch is what authorizes the
+  rebase and force-push of that branch; the first one is `feat/elevenlabs-tts-options`
+  (upstream pull request 39382). This is not a way to push to any other fork branch, and it
+  never rewrites `ezop`, `upstream` or `main`.
 - No pull request inside the fork carries an upstream tree: it has no `gate` (the tree holds
   upstream workflows, not `fork-*` ones), its diff would span the upstream history, and it
   would run upstream workflows in the fork.
@@ -347,8 +349,9 @@ green `gate`, and `gate` cannot run on an upstream tree.
   request. Before the first push, check that no workflow in its tree has a push trigger that
   matches the branch name.
 - The upstream base commit (`BASE`) is fetched into a local ref and never pushed. That keeps
-  the rule that nobody pushes upstream tags or other upstream refs to the fork: no ref in
-  the fork names an upstream commit; the candidate only has it as an ancestor.
+  the rule that nobody pushes upstream tags or other upstream refs to the fork: this
+  procedure creates no ref that names an upstream commit; the candidate only has it as an
+  ancestor.
 
 ### Procedure
 
