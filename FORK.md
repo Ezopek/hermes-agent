@@ -359,13 +359,15 @@ green `gate`, and `gate` cannot run on an upstream tree.
 `<upstream URL>` the upstream repository. `BASE` and `SHA` (the candidate) are the full
 SHAs recorded on the issue.
 
-1. **Prepare the inputs** (agent). Fetch upstream `main` into a local ref and record its full
-   SHA as `BASE`. Rebase the contribution onto `BASE`; fixes go in as separate commits. Run
-   the tests for the changed area and `scripts/check` with a temporary `HERMES_HOME` and no
-   credentials. Push the candidate `<ISSUE-ID>-…` and a backup `<ISSUE-ID>-pr<N>-prev` that
-   points at the current head of `<branch>`. On the issue, record the candidate SHA, `BASE`,
-   the commands with their exit codes, and what the tests do not cover. The pull request
-   description and the reply to reviewers are issue documents.
+1. **Prepare the inputs** (agent). First read the head of `<branch>` and push it as the
+   backup `<ISSUE-ID>-pr<N>-prev`; the candidate is built from that head, so the backup is
+   what the rebase starts from, whatever happens to `<branch>` later. Fetch upstream `main`
+   into a local ref and record its full SHA as `BASE`. Rebase the contribution onto `BASE`;
+   fixes go in as separate commits. Run the tests for the changed area and `scripts/check`
+   with a temporary `HERMES_HOME` and no credentials. Push the candidate `<ISSUE-ID>-…`. On
+   the issue, record the candidate SHA, `BASE`, the backup SHA, the commands with their exit
+   codes, and what the tests do not cover. The pull request description and the reply to
+   reviewers are issue documents.
 
 2. **Review** (delegate). In a clean clone, check out the exact candidate SHA detached and
    review it against `BASE` held in a local ref:
