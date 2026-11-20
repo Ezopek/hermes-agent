@@ -114,7 +114,7 @@ hermes config set   # Set individual config values
 hermes config get   # Print individual config values
 hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
 hermes setup        # Run the full setup wizard (configures everything at once)
-hermes update       # Update to the latest version
+hermes update       # Update to the latest version (fork installs: see FORK.md first)
 hermes doctor       # Diagnose any issues
 ```
 
