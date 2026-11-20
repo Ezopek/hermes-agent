@@ -406,6 +406,7 @@ names in any earlier report are one moment's state, not constants: record what t
    jq -r .packages.venv.environment "$INSTALL_DIR/facts.json"   # generation selected on disk
    ls "$INSTALL_DIR/environments/"                              # generations present
    jq '{pid,code_sha}' "$H/gateway_state.json"
+   jq '{commit,dirty,displayVersion,branch}' "$CHECKOUT/install-stamp.json"
    GPID=$(jq -r .pid "$H/gateway_state.json")
    grep -o "$INSTALL_DIR/environments/[^/]*" /proc/$GPID/maps | sort -u   # generation mapped
    ```
@@ -525,25 +526,40 @@ real installation.
   dependency rebuild. It restores code only, not data.
 
 Order matters, because `hermes import` refuses to run while a gateway runs and can itself
-start an existing gateway service when it finishes (whether it can start a system unit
-without privilege is unchecked):
+start an existing gateway service when it finishes, whether or not the restore succeeded
+(whether it can start a system unit without privilege is unchecked):
 
 1. `sudo systemctl stop $UNITS`
 2. `git -C "$CHECKOUT" checkout --detach "$PREV"`
 3. Re-run the install completion at that commit with the managed interpreter the launcher uses
    (`PY`; its path changes when the managed tools are upgraded):
    `"$PY" -I "$CHECKOUT/hermes_cli/source_completion.py" --source "$CHECKOUT"`
-4. `hermes import "$Z"`; exit status 0 is required. It restores the files in the archive,
-   including, if the checkout lives under `HERMES_HOME`, its files as they were at step 3b
-   (that is `PREV`). If it suggests running `hermes gateway run`, do not.
-5. `sudo systemctl start $UNITS` (a no-op if import already started it), then
-   `systemctl is-active $UNITS` must print `active` for each unit,
-   `git -C "$CHECKOUT" status --short` must be empty, and the checks of step 6 apply with
-   `PREV` in place of `M` (the checkout stays on a detached HEAD; the next update with
-   `--branch ezop` switches it back to `ezop`).
+4. `hermes import --force "$Z"`. Without `--force` it asks "Continue? [y/N]", and answering
+   anything else (or just pressing Enter) prints "Aborted." and still exits 0, so the exit
+   status alone does not show a restore. Success is exit status 0 **and** the final line
+   `Done. Your Hermes configuration has been restored.`. It restores data and configuration
+   from the archive; it does not restore the code (steps 2 and 3 set that), a checkout
+   directory named `hermes-agent`, or the dependency environments, which the archive
+   excludes. A checkout stored under another name inside `H` is included without its `.git`
+   and is restored to its state at step 3b, which must again match `PREV` (step 5 checks
+   this). If it suggests running `hermes gateway run`, do not.
+5. `sudo systemctl start $UNITS` (a no-op if import already started it), then check, with
+   `PREV` and the step 0 records in place of `M` and the new version:
+   - `systemctl is-active $UNITS` prints `active` for each unit;
+   - `git -C "$CHECKOUT" status --short` is empty and `rev-parse HEAD` is `PREV`. The
+     checkout is on a detached HEAD, so the `ezop` branch checks of step 6 do not apply; the
+     next update with `--branch ezop` switches it back to `ezop`;
+   - `jq '{commit,dirty,displayVersion}' "$CHECKOUT/install-stamp.json"` shows `commit` equal
+     to `PREV`, `dirty` false, and `displayVersion` as recorded in step 0 (the `branch` field
+     is recorded, not judged);
+   - `code_sha` in `$H/gateway_state.json` is `PREV` and its `pid` differs from the one
+     recorded in step 0;
+   - `journalctl -u <each unit> --since "<time of rollback step 1>" -p err` shows no entries.
 
-If `hermes import` fails, leave the services stopped, do not start them on a half-restored
-home, and escalate to the operator.
+If `hermes import` fails, prints "Aborted.", or does not print the final line, stop the
+services again (`sudo systemctl stop $UNITS`): import tries to start an existing gateway
+service even when the restore is incomplete, so one may be running on a half-restored home.
+Leave them stopped, keep `$Z`, and escalate to the operator.
 
 ### P1: eligibility check
 
