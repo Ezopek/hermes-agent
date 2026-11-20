@@ -182,6 +182,10 @@ as one merge commit.
   and only to the exact commit of the release tag.
 - `ezop` is the fork trunk, where the change lands.
 - Nobody pushes upstream tags or any other upstream ref to the fork.
+- `main` is an old, stale raw mirror of upstream that nothing uses. It is neither the
+  trunk nor the release mirror: no pull request targets it and nobody moves it. An update
+  tool that defaults to `main` therefore selects the wrong code (see
+  [Updating the installed checkout](#updating-the-installed-checkout)).
 
 Before moving `upstream`, read the workflows in the release tree and decide which of them
 could run on the fork: their triggers, the secrets they use and the permissions they ask for.
@@ -320,3 +324,395 @@ For a release sync that means:
 - How GitHub counts an earlier check run on a head after its pull request base changes.
 - A race where `ezop` moves after the last check in step 5. The tree comparison in step 6
   detects it; nothing prevents it.
+
+## Updating the installed checkout
+
+How a Hermes installation that runs this fork's code from a git checkout is moved to a new
+`ezop` head. It is a manual procedure for the operator, or for a delegate the operator names,
+run as the user that owns the installation. Agents only prepare its inputs. It is separate
+from [Release sync](#release-sync): that procedure delivers a release to `ezop` in this
+repository; this one changes what a host runs, and merging a release does not update any
+host. Where upstream's updating guide differs (default update target, `--backup` as the
+rollback source, `/snapshot restore`), this section governs for this fork.
+
+Terms used below:
+
+- `CHECKOUT` is the installed checkout, the directory the `hermes` launcher runs from.
+- `H` is the installation's home directory for the file paths below:
+  `H="${HERMES_HOME:-$HOME/.hermes}"`. Leave the `HERMES_HOME` environment variable as it is
+  (normally unset) for every `hermes` command, or set it identically in every step.
+- `UNITS` are the service units that run this installation and were running when the window
+  started (typically a gateway and a dashboard). Use `systemctl --user` if they are user units.
+- `TAG` is the release tag (`vX.Y.Z`) being installed, and `M` is the commit on the head of
+  `origin/ezop` that must end up installed. After a Release sync, `M` is the merge commit it
+  records.
+
+### No routine update until qualified
+
+Routine updates of an installed checkout are prohibited until two conditions are met: this
+section is merged to `ezop`, and the practice update [P2](#p2-practice-update-without-new-code)
+has run green. The prohibition ends when the operator records that both are met; merging
+this section alone does not end it, and nobody else may declare it ended. Removing the
+stale `main` branch ([T1](#t1-retire-the-stale-main-branch)) is not a condition: it is
+optional hardening, and keeping `main` does not extend the prohibition.
+
+Do not run a bare `hermes update`, a bare `hermes update --check` (the one exception is the
+optional check at the end of T1), or `/update` in any chat platform on such an installation.
+The reasons:
+
+- A fork checkout follows the `main` update channel unless told otherwise, and the supported
+  way to change the target is `--branch`. The `stable` channel reads GitHub releases of `origin`, which for this
+  fork means no releases, so it fails. A bare update therefore targets `origin/main`, the stale
+  mirror described under [Branches](#branches): old upstream code without the baseline release
+  and without any carried behaviour. `/update` runs the same command without a branch.
+- The updater's downgrade guard may refuse that move today, but only conditionally: it refuses
+  when the target lacks the runtime ledger and a profile's store already holds ledger rows. It
+  allows the update when it cannot decide (an unreadable store, an incomplete target, a run with
+  a different `HERMES_HOME`). It is neither a guaranteed refusal nor a supported route, and
+  this procedure does not rely on it.
+- A bare `--check` compares `HEAD` with `origin/main` only and can print "Already up to date"
+  for a checkout that a real run would move.
+
+This is a documented prohibition, not a technical control. The only runs of this procedure
+allowed before it ends are [P1](#p1-eligibility-check) and P2.
+
+The supported update always passes `--branch ezop` explicitly. That forces the `main` channel
+onto `origin/ezop`; no upstream sync runs for a branch other than `main`, and a checkout left on
+a detached HEAD is switched onto `ezop` (a fast-forward when the commit is the same).
+
+### Before you start
+
+- Run in an ordinary shell as the installation's user, in one shell session so that the
+  variables persist, with your own CLI/TUI sessions closed.
+- `git -C "$CHECKOUT" status --short` must be empty, and `origin` must be this fork.
+- Stopping and starting system units needs `sudo`. The update itself runs with
+  `--no-gateway-restart`, so the updater stops and restarts nothing and needs no privilege.
+- Check free space first (`df -h "$H"`). The backup covers most of `HERMES_HOME`
+  (including large data directories and logs), its size is not predicted, and a full disk
+  makes the backup fail, which the gate below catches.
+
+### Procedure
+
+Run each step in order and record its output. Hashes, process ids and dependency-generation
+names in any earlier report are one moment's state, not constants: record what the host shows.
+
+0. **Record the starting state.**
+
+   ```bash
+   H="${HERMES_HOME:-$HOME/.hermes}"
+   PREV=$(git -C "$CHECKOUT" rev-parse HEAD); echo "$PREV"
+   systemctl list-units 'hermes-*' --state=active --no-legend   # decide UNITS from this
+   INSTALL_DIR=$H/installs/<id>   # the entry whose facts.json belongs to CHECKOUT
+   jq -r .packages.venv.environment "$INSTALL_DIR/facts.json"   # generation selected on disk
+   ls "$INSTALL_DIR/environments/"                              # generations present
+   jq '{pid,code_sha}' "$H/gateway_state.json"
+   GPID=$(jq -r .pid "$H/gateway_state.json")
+   grep -o "$INSTALL_DIR/environments/[^/]*" /proc/$GPID/maps | sort -u   # generation mapped
+   ```
+
+   `PREV` is the rollback point. The two generations recorded here (selected on disk, and
+   mapped by the running gateway) can differ, because a running process keeps what it imported
+   at its start; they are the "generations before the update" for step 6. Record them as
+   found; nothing is compared with hashes quoted in earlier reports.
+
+1. **Fetch the release tag locally** (new release only; skip it for P2). The fork carries no
+   release tags, and without the tag the displayed version stays at the old base and plugins
+   that require a newer Hermes may not load. The tag is local and never pushed.
+
+   ```bash
+   git -C "$CHECKOUT" fetch --no-tags https://github.com/NousResearch/hermes-agent.git \
+     "refs/tags/$TAG:refs/tags/$TAG"
+   ```
+
+2. **Preview.**
+
+   ```bash
+   hermes update --check --branch ezop
+   test "$(git -C "$CHECKOUT" rev-parse origin/ezop)" = "$M" && echo "origin/ezop = M"
+   ```
+
+   For a new release it must report an update and `origin/ezop` must be `M`. For P2 it must
+   match the class P1 recorded, and `origin/ezop` must be `M` (see P2). Anything else: stop.
+
+3. **Stop the services**, then note the time.
+
+   ```bash
+   sudo systemctl stop $UNITS
+   START=$(date '+%F %T')
+   ```
+
+   3b. **Take the backup (K1 gate).** A separate native backup, not `hermes update --backup`.
+   The update's own `--backup` is best effort: a failed backup never stops the update, it is
+   not verified after writing, and the update's receipt can report success without a usable
+   archive. Here the backup's own exit status decides, then the archive is tested.
+
+   ```bash
+   Z="$H/backups/hermes-backup-$(date +%F-%H%M%S).zip"
+   hermes backup -o "$Z"; B=$?; echo "backup exit=$B"
+   unzip -tq "$Z";        U=$?; echo "unzip exit=$U"
+   [ "$B" -eq 0 ] && [ "$U" -eq 0 ] && echo "K1 green" || echo "K1 RED: do not update"
+   ```
+
+   `hermes backup` exits 1 when the archive is incomplete and 2 when another backup holds the
+   lock. `unzip -tq` checks that the file is a readable zip and that every member present
+   matches its stored checksum. It does not prove the archive holds everything it should
+   (that is the backup's exit status), that the SQLite databases inside are consistent, or
+   that a restore will work; `hermes import` re-checks the checksums when it restores and is
+   the real test. Do not substitute `python3 -m zipfile -t`: it exits 0 even for a damaged
+   member.
+
+   If either exit status is not 0, **do not update**. Start the services again
+   (`sudo systemctl start $UNITS`), record the result, and keep `$Z` (or the
+   `*.incomplete.zip`) for diagnosis.
+
+   Backups made by hand are not pruned automatically; the operator removes old ones.
+   With `updates.pre_update_backup` off, the update takes no quick state snapshots either.
+   They are a subset of this full backup, so restoring is by `hermes import` of `$Z`, not by
+   `/snapshot restore`.
+
+4. **Update.**
+
+   ```bash
+   hermes update --branch ezop --no-gateway-restart; echo "exit=$?"
+   ```
+
+   Exit status other than 0: do not start the services; go to [Rollback](#rollback).
+
+5. **Start the services.**
+
+   ```bash
+   sudo systemctl start $UNITS
+   ```
+
+6. **Verify.** All of these must hold:
+
+   - `git -C "$CHECKOUT" rev-parse HEAD` is `M`, and `git -C "$CHECKOUT" symbolic-ref --short HEAD`
+     is `ezop`.
+   - `jq '{commit,dirty,displayVersion,branch}' "$CHECKOUT/install-stamp.json"`: `commit` is
+     `M`, `dirty` is `false`, `branch` is `ezop`, and `displayVersion` starts with the version
+     of `TAG`.
+   - `systemctl is-active $UNITS` prints `active` for every unit.
+   - `code_sha` in `$H/gateway_state.json` is `M` and its `pid` differs from step 0.
+   - `journalctl -u <each unit> --since "$START" -p err` shows no entries.
+
+   Also record, without pass or fail, the same generation facts as step 0: the generation
+   selected on disk (`jq -r .packages.venv.environment "$INSTALL_DIR/facts.json"`),
+   `ls "$INSTALL_DIR/environments/"`, and the generation the new gateway process maps (the
+   `grep` on `/proc/<new pid>/maps`), and which generations from step 0 are gone. That is the
+   only evidence of whether the generation from before the update survived.
+
+   Every point green is a green run. Any red point: [Rollback](#rollback).
+
+### Rollback
+
+State of knowledge: this rollback is derived from the source and has not been exercised on a
+real installation.
+
+- **Needs:** `PREV` from step 0 and the green K1 archive `$Z` from the same window. Without
+  both, do not start an update.
+- **Data-loss boundary:** the services were stopped from step 3, so restoring `$Z` returns
+  the home to its state at step 3b. What is lost is what was written after the services
+  were started in step 5, such as messages and sessions from that period, and anything else
+  written into `HERMES_HOME` since.
+- **Always restore `$Z` when rolling back in the same window.** The update's completion step
+  and the first start may have migrated data that the old code cannot read.
+- **Dependencies:** the previous dependency generation is retained only if the updater's
+  collector left it. It removes generations that are not selected, are older than a day and
+  hold no lease, and nobody has shown that the pre-update generation survives a real update.
+  If it is gone, the completion step in item 3 below rebuilds it and needs network access.
+- **Fallback:** while the operator has not retired it, the fallback checkout kept beside the
+  installed one since activation, with its launchers, restores the old code without any
+  dependency rebuild. It restores code only, not data.
+
+Order matters, because `hermes import` refuses to run while a gateway runs and can itself
+start an existing gateway service when it finishes (whether it can start a system unit
+without privilege is unchecked):
+
+1. `sudo systemctl stop $UNITS`
+2. `git -C "$CHECKOUT" checkout --detach "$PREV"`
+3. Re-run the install completion at that commit with the managed interpreter the launcher uses
+   (`PY`; its path changes when the managed tools are upgraded):
+   `"$PY" -I "$CHECKOUT/hermes_cli/source_completion.py" --source "$CHECKOUT"`
+4. `hermes import "$Z"`; exit status 0 is required. It restores the files in the archive,
+   including, if the checkout lives under `HERMES_HOME`, its files as they were at step 3b
+   (that is `PREV`). If it suggests running `hermes gateway run`, do not.
+5. `sudo systemctl start $UNITS` (a no-op if import already started it), then
+   `systemctl is-active $UNITS` must print `active` for each unit,
+   `git -C "$CHECKOUT" status --short` must be empty, and the checks of step 6 apply with
+   `PREV` in place of `M` (the checkout stays on a detached HEAD; the next update with
+   `--branch ezop` switches it back to `ezop`).
+
+If `hermes import` fails, leave the services stopped, do not start them on a half-restored
+home, and escalate to the operator.
+
+### P1: eligibility check
+
+A check that interrupts nothing and can be run any time. It confirms that the installed
+checkout can reach the fork and classifies how far it is from `origin/ezop`. It writes only
+remote-tracking refs and tags in `CHECKOUT/.git` and logs under `H`.
+
+Inputs: `CHECKOUT`, and `hermes` from `PATH` resolving to that checkout.
+
+```bash
+git -C "$CHECKOUT" remote get-url origin       # this fork
+git -C "$CHECKOUT" status --short              # empty
+hermes update --check --branch ezop; echo "exit=$?"
+git -C "$CHECKOUT" rev-parse HEAD origin/ezop
+git -C "$CHECKOUT" merge-base --is-ancestor HEAD origin/ezop && echo "HEAD is behind or equal"
+git -C "$CHECKOUT" diff --name-only HEAD origin/ezop        # what an update would change
+```
+
+Pass: the remote is this fork, the tree is clean, the check exits 0, and `HEAD` is an
+ancestor of `origin/ezop`. Any error, a diverged `HEAD` or other output is a fail: stop and
+record it. A pass classifies the checkout as one of:
+
+- **Current:** "Already up to date." and `HEAD` equals `origin/ezop`. P2 is a no-new-code run.
+- **Behind by documentation only:** an update is available and every changed path is a
+  documentation file (`*.md`). P2 is still a no-new-code run, but it will fetch those commits.
+- **Behind by anything else:** code, dependencies or workflows changed. That is a real update
+  (follow the procedure above with `M` and, for a release, `TAG`), not a P2, and it is the
+  operator's call.
+
+P1 only reads metadata. It does not exercise the backup, the completion step, migrations, a
+restart or the downgrade guard.
+
+### P2: practice update without new code
+
+One real update with no new code, in a window that the operator names separately (it is not
+implied by P1 or by merging this section). Services are down for the full backup, the
+completion step and the restart; their length on this installation is unknown, so agree a
+generous window.
+
+Inputs: a P1 pass, repeated right before the window, that classified the checkout as
+Current or Behind by documentation only; `M` is the commit `origin/ezop` points to after that
+check; `TAG` is the release tag of the baseline named under
+[Upstream baseline](#upstream-baseline). If `origin/ezop` has moved to anything other than
+documentation since, stop and refer it to the operator: it is no longer a no-new-code run.
+Merging this section itself puts the installed checkout in the second class, so this is the
+expected case.
+
+Run steps 0, 2, 3, 3b, 4, 5 and 6 above. Skip step 1 (the tag is already present: check
+`git -C "$CHECKOUT" tag -l "$TAG"`). Step 2 must print "Already up to date." when the
+checkout is Current, and "Update available" when it is behind by documentation only.
+
+Green: K1 green (both exits 0), step 4 exit 0, every point of step 6 green with `M` as above,
+and the stamp's `branch` is `ezop`. Red: any other result; roll back and record it. Record
+the outputs of steps 0, 3b, 4 and 6, the archive size and the backup time, wherever the
+operator keeps sync records. A green P2 together with this section merged is what lets the
+operator end the prohibition.
+
+What P2 exercises: the K1 gate; the switch from a detached HEAD onto `ezop` (at the same
+commit when Current, or after fetching documentation-only commits); the whole installation
+completion step with no "already up to date" shortcut (dependency sync, the generation
+collector, launchers, frontend dependencies, data migrations and maintenance, the stamp
+written with the branch). What it does not: updater-driven service pause
+(`--no-gateway-restart` skips it), a code update, building a new dependency generation,
+whether the pre-update generation is retained once a new one replaces it, migrations of new
+code, rollback, or the downgrade guard. The selected dependency generation can also change
+without any update (a plugin may install an extra on first use), so the restart in step 5 may
+be the first start on a newer generation that was already committed. If step 6 turns red, look
+in the journal for import errors before blaming the update, and compare against the
+generations recorded in steps 0 and 6.
+
+### T1: retire the stale `main` branch
+
+Optional hardening for the repository administrator (the operator, or an administrator the
+operator names), never an agent: it changes branch protection. With `main` gone, a bare
+`hermes update` or `/update` fails while resolving the channel or fetching `origin/main`,
+before the updater stops anything, whatever the state of the local stores. That follows from the source and has not
+been exercised. It is not a condition for ending the prohibition above.
+
+Nothing is lost: all of `main` is contained in `ezop` and in `upstream`, which step 0
+re-checks. The branch can be recreated at the archived commit (see
+[Restoring `main`](#restoring-main)).
+
+Mechanics (re-read at execution, not assumed): `main` is protected by repository rulesets
+whose `conditions.ref_name.include` lists `refs/heads/main` literally next to
+`refs/heads/upstream`: one carries the `deletion` and `non_fast_forward` rules, another the
+`update` rule. The `ezop` trunk has its own separate ruleset (pull request, `gate` and
+`xreview`, deletion and non-fast-forward protection). The adjustment is to remove the single
+string `refs/heads/main` from the include list of the rulesets that block the deletion, and
+nothing else. Never delete, disable or loosen a ruleset, change a rule, an enforcement mode or
+a bypass list, or touch `upstream` or `ezop`. Run it with administrator credentials; the
+commands below are examples with `R=<owner>/<repo>`.
+
+0. **Guards.** Every one must hold, or stop.
+
+   ```bash
+   git fetch origin
+   gh api repos/$R --jq .default_branch                    # ezop
+   MAIN_OID=$(gh api repos/$R/git/ref/heads/main --jq .object.sha); echo "$MAIN_OID"
+   git merge-base --is-ancestor "$MAIN_OID" origin/ezop     && echo "in ezop"
+   git merge-base --is-ancestor "$MAIN_OID" origin/upstream && echo "in upstream"
+   gh pr list -R $R --base main --state open                # no output
+   ```
+
+1. **Archive the preimages** in a directory outside the repository.
+
+   ```bash
+   gh api repos/$R/git/ref/heads/main > main-ref.json
+   for b in main ezop upstream; do gh api repos/$R/rules/branches/$b > rules-on-$b.json; done
+   for id in $(gh api repos/$R/rulesets --jq '.[].id'); do
+     gh api repos/$R/rulesets/$id > ruleset-$id.json; done
+   gh api repos/$R/branches/main/protection > classic-protection.json   # 404 = none
+   ```
+
+   Which rulesets matter is decided by `rules-on-main.json` (its `ruleset_id` values), not by
+   name. Stop and escalate instead of editing if a ruleset covers `main` by a pattern,
+   `~ALL`, `~DEFAULT_BRANCH` or an exclude list rather than the literal `refs/heads/main`, if
+   removing the string would leave an include list empty, or if classic branch protection
+   exists on `main`: each of those is a wider change than this procedure covers. The preimage
+   JSON, including any bypass list, is the source for every payload below.
+
+2. **Remove `main` from the ruleset that carries `deletion`.** Build the payload from the
+   archived preimage:
+
+   ```bash
+   ID=<ruleset id>
+   jq '{name,target,enforcement,bypass_actors,conditions,rules}
+       | with_entries(select(.value != null))
+       | .conditions.ref_name.include -= ["refs/heads/main"]' ruleset-$ID.json > edit-$ID.json
+   diff <(jq -S .conditions ruleset-$ID.json) <(jq -S .conditions edit-$ID.json)  # only that string
+   gh api -X PUT repos/$R/rulesets/$ID --input edit-$ID.json
+   ```
+
+3. **Delete the branch.**
+
+   ```bash
+   gh api -X DELETE repos/$R/git/refs/heads/main
+   ```
+
+   If GitHub refuses because of the `update` rule, repeat step 2 for the ruleset that carries
+   it, then delete again. Do not edit any ruleset that does not appear in `rules-on-main.json`.
+
+4. **Verify.**
+
+   ```bash
+   gh api repos/$R/branches/main            # 404
+   gh api repos/$R --jq .default_branch     # ezop
+   git ls-remote origin refs/heads/main     # no output
+   ```
+
+   `ezop` and `upstream` must be unchanged apart from legitimate pull request merges into
+   `ezop`; `rules-on-ezop.json` and `rules-on-upstream.json` re-read now must match the
+   archived ones.
+
+5. **Put the protections back.** Re-apply the archived preimage of every ruleset edited in
+   steps 2-3 (the same `jq` filter without the `-=` line, `PUT` to the same id) and compare:
+   `jq -S 'del(.updated_at)'` of a fresh read must equal the archive. If step 3 failed for any
+   other reason, do this at once and stop; nothing else has changed.
+
+Optional check on the installed checkout, no restart: a bare `hermes update --check` (the exception to
+the prohibition above; it changes nothing) should now fail on the missing `main` instead of
+printing "Already up to date." (source reading; not exercised). If it does neither, record it.
+
+#### Restoring `main`
+
+Recreate the branch at the archived commit and put the protections back:
+
+```bash
+gh api -X POST repos/$R/git/refs -f ref=refs/heads/main -f sha="$MAIN_OID"
+```
+
+If a ruleset refuses the creation, repeat step 2 for it first. Then re-apply the archived
+preimage as in step 5 and verify `git ls-remote origin refs/heads/main` prints `$MAIN_OID`.
