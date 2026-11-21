@@ -362,6 +362,8 @@ The `deliver` field controls where the agent's response goes after processing th
 | `weixin` | Routes the response to Weixin (WeChat). Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `bluebubbles` | Routes the response to BlueBubbles (iMessage). Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 
+A webhook run has no human reader, so a healthy run whose final answer is only a silence marker (`NO_REPLY`, `[SILENT]`) delivers nothing and does not produce the "silence marker for a message that needed a reply" warning. Failed, partial, interrupted, and empty runs still deliver their visible notice. Set `platforms.webhook.allow_silence: false` to keep the warning for a bare marker.
+
 For cross-platform delivery, the target platform must also be enabled and connected in the gateway. If no `chat_id` is provided in `deliver_extra`, the response is sent to that platform's configured home channel.
 
 ### Replying to a delivery {#replying-to-a-delivery}
